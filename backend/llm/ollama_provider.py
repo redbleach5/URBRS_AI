@@ -16,7 +16,7 @@ from ..core.model_performance_tracker import get_performance_tracker
 
 
 class OllamaProvider(BaseLLMProvider):
-    """Ollama local models provider"""
+    """Ollama local models provider with automatic server fallback"""
     
     def __init__(self, config: dict):
         super().__init__(config)
@@ -25,9 +25,43 @@ class OllamaProvider(BaseLLMProvider):
         self.recommended_models = config.get("recommended_models", {})
         self.client: Optional[httpx.AsyncClient] = None
         self._available_models: List[str] = []
+        
+        # Fallback URLs для автоматического переключения серверов
+        self.fallback_urls = config.get("fallback_urls", [])
+        self.additional_servers = config.get("additional_servers", [])
+        self._all_server_urls: List[str] = self._build_server_list()
+        self._current_server_index = 0
+        self._working_url: Optional[str] = None  # Последний работающий URL
+    
+    def _build_server_list(self) -> List[str]:
+        """Строит список всех серверов для fallback"""
+        urls = [self.base_url]
+        
+        # Добавляем fallback URLs
+        for url in self.fallback_urls:
+            if not url.startswith("http"):
+                url = f"http://{url}"
+            if url not in urls:
+                urls.append(url)
+        
+        # Добавляем additional_servers
+        for server in self.additional_servers:
+            url = server.get("url", "")
+            if url and url not in urls:
+                urls.append(url)
+        
+        # Всегда добавляем localhost как последний fallback
+        localhost = "http://localhost:11434"
+        if localhost not in urls:
+            urls.append(localhost)
+        
+        return urls
     
     async def initialize(self) -> None:
         """Initialize Ollama client and detect available models
+        
+        Автоматически пробует все сконфигурированные серверы (base_url, fallback_urls, additional_servers).
+        Использует первый работающий сервер.
         
         Оптимизировано для работы с 30+ моделями 60B+ параметров:
         - Connection pooling (50 keepalive, 100 max connections)
@@ -38,34 +72,76 @@ class OllamaProvider(BaseLLMProvider):
         cache_config = self.config.get("cache", {})
         from ..core.advanced_cache import AdvancedCache
         self.advanced_cache = AdvancedCache(
-            memory_size=cache_config.get("memory_size", 2000),  # Больше для 30 моделей
+            memory_size=cache_config.get("memory_size", 2000),
             disk_cache_dir=cache_config.get("disk_cache_dir", "cache/ollama"),
             redis_url=cache_config.get("redis_url"),
-            ttl=cache_config.get("ttl", 7200)  # 2 часа для больших моделей
+            ttl=cache_config.get("ttl", 7200)
         )
         
-        # Try to use HTTP/2 if available, fall back to HTTP/1.1
-        use_http2 = True
+        # Пробуем подключиться к каждому серверу из списка
+        connected = False
+        last_error = None
+        
+        for idx, server_url in enumerate(self._all_server_urls):
+            logger.info(f"Trying Ollama server {idx + 1}/{len(self._all_server_urls)}: {server_url}")
+            
+            try:
+                client = await self._create_client(server_url)
+                
+                # Test connection
+                response = await client.get("/api/tags", timeout=5.0)
+                if response.status_code == 200:
+                    data = response.json()
+                    models = [model["name"] for model in data.get("models", [])]
+                    
+                    if models:  # Сервер работает и имеет модели
+                        self.client = client
+                        self.base_url = server_url
+                        self._working_url = server_url
+                        self._current_server_index = idx
+                        self._available_models = models
+                        connected = True
+                        logger.info(f"✅ Connected to Ollama at {server_url} with {len(models)} models")
+                        break
+                    else:
+                        logger.warning(f"Server {server_url} has no models, trying next...")
+                        await client.aclose()
+                else:
+                    logger.warning(f"Server {server_url} returned status {response.status_code}")
+                    await client.aclose()
+                    
+            except Exception as e:
+                last_error = e
+                logger.debug(f"Failed to connect to {server_url}: {e}")
+                continue
+        
+        if not connected:
+            logger.warning(f"Could not connect to any Ollama server. Last error: {last_error}")
+            # Создаем клиент для base_url как fallback (может заработать позже)
+            self.client = await self._create_client(self.base_url)
+            self._available_models = []
+        
+        # Выбираем дефолтную модель
+        self._select_default_model()
+    
+    async def _create_client(self, base_url: str) -> httpx.AsyncClient:
+        """Создаёт httpx клиент с оптимальными настройками"""
         try:
-            # HTTP client с оптимизированным connection pooling для 30 моделей
-            # Try HTTP/2 first for better performance
-            self.client = httpx.AsyncClient(
-                base_url=self.base_url,
+            return httpx.AsyncClient(
+                base_url=base_url,
                 timeout=self.timeout,
                 limits=httpx.Limits(
-                    max_keepalive_connections=50,  # Увеличено для 30 моделей
-                    max_connections=100,  # Достаточно для параллельных запросов
-                    keepalive_expiry=30.0  # Держим соединения открытыми
+                    max_keepalive_connections=50,
+                    max_connections=100,
+                    keepalive_expiry=30.0
                 ),
-                http2=True  # HTTP/2 для лучшей производительности
+                http2=True
             )
         except Exception as e:
-            # If HTTP/2 fails (e.g., h2 package not installed), fall back to HTTP/1.1
             if "h2" in str(e).lower() or "http2" in str(e).lower():
-                logger.info("HTTP/2 not available (h2 package not installed), using HTTP/1.1")
-                use_http2 = False
-                self.client = httpx.AsyncClient(
-                    base_url=self.base_url,
+                logger.debug("HTTP/2 not available, using HTTP/1.1")
+                return httpx.AsyncClient(
+                    base_url=base_url,
                     timeout=self.timeout,
                     limits=httpx.Limits(
                         max_keepalive_connections=50,
@@ -74,97 +150,110 @@ class OllamaProvider(BaseLLMProvider):
                     ),
                     http2=False
                 )
-            else:
-                # Re-raise if it's a different error
-                raise
-        
-        try:
-            # Test connection
-            response = await self.client.get("/api/tags")
-            if response.status_code == 200:
-                data = response.json()
-                self._available_models = [model["name"] for model in data.get("models", [])]
-                logger.info(f"Ollama provider initialized with {len(self._available_models)} models")
-            else:
-                logger.warning("Ollama server not responding, but provider initialized")
-                self._available_models = []
-            
-            # Set default model if not set or not available
-            if not self.default_model or (self.default_model and self.default_model not in self._available_models):
-                if self._available_models:
-                    # Try to find model from recommended_models (priority for chat)
-                    fallback_model = None
-                    
-                    # First try to find model from recommended_models for chat
-                    if self.recommended_models and "chat" in self.recommended_models:
-                        for recommended in self.recommended_models["chat"]:
-                            # Support partial matching (e.g., "gemma3" matches "gemma3:1b")
+            raise
+    
+    def _select_default_model(self) -> None:
+        """Выбирает дефолтную модель из доступных"""
+        if not self.default_model or self.default_model not in self._available_models:
+            if self._available_models:
+                fallback_model = None
+                
+                # Приоритет: recommended_models.chat
+                if self.recommended_models and "chat" in self.recommended_models:
+                    for recommended in self.recommended_models["chat"]:
+                        for available in self._available_models:
+                            if recommended in available or available.startswith(recommended):
+                                fallback_model = available
+                                break
+                        if fallback_model:
+                            break
+                
+                # Затем другие категории
+                if not fallback_model and self.recommended_models:
+                    for category, models in self.recommended_models.items():
+                        if category == "chat":
+                            continue
+                        for recommended in models:
                             for available in self._available_models:
                                 if recommended in available or available.startswith(recommended):
                                     fallback_model = available
                                     break
                             if fallback_model:
                                 break
-                    
-                    # If not found in chat, try other categories
-                    if not fallback_model and self.recommended_models:
-                        for category, models in self.recommended_models.items():
-                            if category == "chat":
-                                continue  # Already checked
-                            for recommended in models:
-                                for available in self._available_models:
-                                    if recommended in available or available.startswith(recommended):
-                                        fallback_model = available
-                                        break
-                                if fallback_model:
-                                    break
-                            if fallback_model:
-                                break
-                    
-                    # If not found in recommended, use first available
-                    if not fallback_model:
-                        fallback_model = self._available_models[0]
-                    
-                    if self.default_model:
-                        logger.warning(
-                            f"Default model '{self.default_model}' not available. "
-                            f"Using '{fallback_model}' instead."
-                        )
-                    else:
-                        logger.info(f"Auto-detected default model: '{fallback_model}'")
-                    self.default_model = fallback_model
-        except Exception as e:
-            logger.warning(f"Failed to connect to Ollama: {e}")
-            # Still initialize, but models won't be available
-            # Use HTTP/1.1 if HTTP/2 was not available, otherwise use the same protocol
-            try:
-                self.client = httpx.AsyncClient(
-                    base_url=self.base_url,
-                    timeout=self.timeout,
-                    limits=httpx.Limits(
-                        max_keepalive_connections=50,
-                        max_connections=100,
-                        keepalive_expiry=30.0
-                    ),
-                    http2=use_http2
-                )
-            except Exception:
-                # If HTTP/2 still fails, use HTTP/1.1
-                self.client = httpx.AsyncClient(
-                    base_url=self.base_url,
-                    timeout=self.timeout,
-                    limits=httpx.Limits(
-                        max_keepalive_connections=50,
-                        max_connections=100,
-                        keepalive_expiry=30.0
-                    ),
-                    http2=False
-                )
+                        if fallback_model:
+                            break
+                
+                # Если не нашли в рекомендуемых - первая доступная
+                if not fallback_model:
+                    fallback_model = self._available_models[0]
+                
+                if self.default_model:
+                    logger.warning(f"Model '{self.default_model}' not available. Using '{fallback_model}'")
+                else:
+                    logger.info(f"Auto-detected default model: '{fallback_model}'")
+                self.default_model = fallback_model
     
     async def shutdown(self) -> None:
         """Shutdown Ollama client"""
         if self.client:
             await self.client.aclose()
+    
+    async def _try_next_server(self) -> bool:
+        """Пробует подключиться к следующему серверу из списка
+        
+        Returns:
+            True если удалось подключиться к другому серверу
+        """
+        if len(self._all_server_urls) <= 1:
+            return False
+        
+        original_index = self._current_server_index
+        
+        for _ in range(len(self._all_server_urls)):
+            self._current_server_index = (self._current_server_index + 1) % len(self._all_server_urls)
+            
+            if self._current_server_index == original_index:
+                break  # Прошли полный круг
+            
+            server_url = self._all_server_urls[self._current_server_index]
+            logger.info(f"🔄 Trying fallback server: {server_url}")
+            
+            try:
+                client = await self._create_client(server_url)
+                response = await client.get("/api/tags", timeout=5.0)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    models = [model["name"] for model in data.get("models", [])]
+                    
+                    if models:
+                        # Закрываем старый клиент
+                        if self.client:
+                            await self.client.aclose()
+                        
+                        self.client = client
+                        self.base_url = server_url
+                        self._working_url = server_url
+                        self._available_models = models
+                        self._select_default_model()
+                        
+                        logger.info(f"✅ Switched to fallback server {server_url} with {len(models)} models")
+                        return True
+                    else:
+                        await client.aclose()
+                else:
+                    await client.aclose()
+                    
+            except Exception as e:
+                logger.debug(f"Fallback server {server_url} failed: {e}")
+                continue
+        
+        logger.warning("All fallback servers exhausted")
+        return False
+    
+    async def get_working_url(self) -> str:
+        """Возвращает текущий работающий URL сервера"""
+        return self._working_url or self.base_url
     
     def _select_best_model(self, task_type: Optional[str] = None, model: Optional[str] = None) -> str:
         """
@@ -581,7 +670,25 @@ Show your reasoning process clearly. Think deeply before providing your final an
                 thinking=thinking_content,
                 has_thinking=thinking_content is not None
             )
-        except httpx.HTTPError as e:
+        except (httpx.HTTPError, httpx.ConnectError, httpx.TimeoutException) as e:
+            # Пробуем fallback сервер при ошибках подключения
+            logger.warning(f"Ollama request failed: {e}. Trying fallback server...")
+            
+            if await self._try_next_server():
+                # Повторяем запрос на новом сервере (рекурсия с защитой)
+                logger.info("Retrying request on fallback server...")
+                try:
+                    return await self.generate(
+                        messages=messages,
+                        model=model,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        thinking_mode=thinking_mode,
+                        **kwargs
+                    )
+                except Exception as retry_error:
+                    logger.error(f"Retry on fallback server also failed: {retry_error}")
+            
             # Record failed request
             duration = time.time() - start_time
             tracker.record_request(
@@ -592,8 +699,25 @@ Show your reasoning process clearly. Think deeply before providing your final an
                 success=False,
                 error_type="HTTPError"
             )
-            raise LLMException(f"Ollama API error: {e}") from e
+            raise LLMException(f"Ollama API error (all servers tried): {e}") from e
         except Exception as e:
+            # Для других ошибок также пробуем fallback
+            if "connect" in str(e).lower() or "timeout" in str(e).lower():
+                logger.warning(f"Connection error: {e}. Trying fallback server...")
+                if await self._try_next_server():
+                    logger.info("Retrying request on fallback server...")
+                    try:
+                        return await self.generate(
+                            messages=messages,
+                            model=model,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            thinking_mode=thinking_mode,
+                            **kwargs
+                        )
+                    except Exception as retry_error:
+                        logger.error(f"Retry on fallback server also failed: {retry_error}")
+            
             # Record failed request
             duration = time.time() - start_time
             tracker.record_request(

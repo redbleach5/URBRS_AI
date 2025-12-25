@@ -5,7 +5,7 @@ Configuration management for AILLM
 import os
 import multiprocessing
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import yaml
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
@@ -26,6 +26,13 @@ except ImportError:
     TORCH_AVAILABLE = False
 
 
+class AdditionalServerConfig(BaseModel):
+    """Configuration for an additional Ollama server"""
+    name: str
+    url: str
+    priority: str = "SECONDARY"  # PRIMARY, SECONDARY, FALLBACK
+
+
 class LLMProviderConfig(BaseModel):
     """Configuration for a single LLM provider"""
     enabled: bool = True
@@ -37,6 +44,12 @@ class LLMProviderConfig(BaseModel):
     cache_enabled: bool = True
     auto_detect_models: bool = False
     recommended_models: Optional[Dict[str, list]] = None
+    
+    # Распределённая маршрутизация (для Ollama)
+    fallback_urls: List[str] = Field(default_factory=list)
+    additional_servers: List[AdditionalServerConfig] = Field(default_factory=list)
+    auto_discover: bool = False
+    distributed_mode: bool = False
 
 
 class LLMConfig(BaseModel):

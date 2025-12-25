@@ -18,23 +18,24 @@ llm:
       auto_detect_models: false
     ollama:
       enabled: true
-      # Основной URL сервера Ollama
-      # Используем localhost как primary (всегда доступен)
+      # Основной URL - localhost как fallback, который всегда доступен
+      # Реальный выбор сервера делает DistributedModelRouter по приоритетам
       base_url: http://localhost:11434
       
-      # Резервные URL (если основной недоступен)
-      # Полезно для динамических IP или failover
+      # Резервные URL (если все серверы недоступны)
       fallback_urls:
-        - http://192.168.178.126:11434  # Удалённый GPU сервер
         - ollama-server.local:11434     # mDNS имя
         - ollama.local:11434            # Альтернативное mDNS
       
       # Дополнительные серверы для распределённой работы
-      # Система автоматически выберет сервер, где есть нужная модель
+      # Приоритеты: PRIMARY (мощный GPU) > SECONDARY (localhost) > FALLBACK
       additional_servers:
-        - name: gpu_server          # Удалённый GPU сервер (если доступен)
+        - name: gpu_server              # Удалённый GPU сервер с RTX 3090
           url: http://192.168.178.126:11434
-          priority: PRIMARY         # Приоритет для мощных моделей
+          priority: PRIMARY             # Высший приоритет для мощных моделей!
+        - name: localhost               # Локальный Ollama (если есть)
+          url: http://localhost:11434
+          priority: SECONDARY           # Второй приоритет - быстрые модели
         # - name: backup_server
         #   url: http://192.168.178.200:11434
         #   priority: FALLBACK

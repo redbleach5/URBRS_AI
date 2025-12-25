@@ -100,34 +100,45 @@ class DistributedModelRouter:
         self._initialize_servers_from_config()
     
     def _initialize_servers_from_config(self):
-        """Инициализирует список серверов из конфигурации"""
+        """Инициализирует список серверов из конфигурации
+        
+        Порядок приоритетов:
+        1. additional_servers с явным priority (PRIMARY для мощного GPU сервера)
+        2. base_url как SECONDARY (безопасный fallback)
+        3. fallback_urls как FALLBACK
+        """
         ollama_config = self.config.get("llm", {}).get("providers", {}).get("ollama", {})
         
-        # Основной URL
+        # СНАЧАЛА добавляем additional_servers с явными приоритетами
+        # Это позволяет мощному GPU серверу быть PRIMARY
+        additional_servers = ollama_config.get("additional_servers", [])
+        for server_config in additional_servers:
+            url = server_config.get("url")
+            name = server_config.get("name", url)
+            priority_str = server_config.get("priority", "SECONDARY").upper()
+            priority = ServerPriority[priority_str]
+            if url:
+                self._add_server(url, name, priority)
+                logger.debug(f"Added additional server: {name} ({url}) priority={priority_str}")
+        
+        # ЗАТЕМ добавляем base_url как SECONDARY (fallback по умолчанию)
         primary_url = ollama_config.get("base_url", "http://localhost:11434")
+        if primary_url not in self.servers:
+            self._add_server(primary_url, "base", ServerPriority.SECONDARY)
         
-        # Добавляем основной сервер
-        self._add_server(primary_url, "primary", ServerPriority.PRIMARY)
-        
-        # Добавляем localhost если он отличается от primary
-        if "localhost" not in primary_url and "127.0.0.1" not in primary_url:
-            self._add_server("http://localhost:11434", "localhost", ServerPriority.SECONDARY)
+        # Добавляем localhost если он отличается от primary и ещё не добавлен
+        localhost_url = "http://localhost:11434"
+        if localhost_url not in self.servers:
+            if "localhost" not in primary_url and "127.0.0.1" not in primary_url:
+                self._add_server(localhost_url, "localhost_fallback", ServerPriority.FALLBACK)
         
         # Добавляем fallback URLs
         fallback_urls = ollama_config.get("fallback_urls", [])
         for i, url in enumerate(fallback_urls):
             if not url.startswith("http"):
                 url = f"http://{url}"
-            self._add_server(url, f"fallback_{i+1}", ServerPriority.FALLBACK)
-        
-        # Добавляем дополнительные серверы из новой конфигурации
-        additional_servers = ollama_config.get("additional_servers", [])
-        for server_config in additional_servers:
-            url = server_config.get("url")
-            name = server_config.get("name", url)
-            priority = ServerPriority[server_config.get("priority", "SECONDARY").upper()]
-            if url:
-                self._add_server(url, name, priority)
+            if url not in self.servers:
+                self._add_server(url, f"fallback_{i+1}", ServerPriority.FALLBACK)
         
         logger.info(f"Initialized with {len(self.servers)} Ollama server(s)")
     
