@@ -18,23 +18,23 @@ llm:
       auto_detect_models: false
     ollama:
       enabled: true
-      # Основной URL сервера Ollama (мощный сервер с GPU)
-      # Поддерживает: IP, hostname, mDNS (ollama.local)
-      base_url: http://192.168.178.126:11434
+      # Основной URL сервера Ollama
+      # Используем localhost как primary (всегда доступен)
+      base_url: http://localhost:11434
       
       # Резервные URL (если основной недоступен)
       # Полезно для динамических IP или failover
       fallback_urls:
-        - ollama-server.local:11434  # mDNS имя (рекомендуется для динамических IP)
-        - ollama.local:11434         # Альтернативное mDNS
-        # - 192.168.178.200:11434    # Резервный сервер
+        - http://192.168.178.126:11434  # Удалённый GPU сервер
+        - ollama-server.local:11434     # mDNS имя
+        - ollama.local:11434            # Альтернативное mDNS
       
       # Дополнительные серверы для распределённой работы
       # Система автоматически выберет сервер, где есть нужная модель
       additional_servers:
-        - name: localhost           # Локальный Ollama (для быстрых/маленьких моделей)
-          url: http://localhost:11434
-          priority: SECONDARY       # PRIMARY, SECONDARY, FALLBACK
+        - name: gpu_server          # Удалённый GPU сервер (если доступен)
+          url: http://192.168.178.126:11434
+          priority: PRIMARY         # Приоритет для мощных моделей
         # - name: backup_server
         #   url: http://192.168.178.200:11434
         #   priority: FALLBACK
