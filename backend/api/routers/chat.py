@@ -184,18 +184,45 @@ async def chat(request: Request, chat_request: ChatRequest):
             except Exception as e:
                 logger.warning(f"Chat web search failed: {e}")
         
-        # Используем выбранную модель если указана
+        # Умный выбор модели на основе сложности сообщения
         model_to_use = chat_request.model
         provider_to_use = chat_request.provider
         
-        # Если указана модель, устанавливаем её для провайдера
+        # Если модель НЕ указана явно, выбираем автоматически
+        if not model_to_use and complexity_info:
+            ollama_provider = llm_manager.providers.get("ollama")
+            if ollama_provider:
+                # Для простых сообщений используем быструю модель
+                if complexity_info.level.value in ["trivial", "simple"]:
+                    # Ищем быструю модель из рекомендованных
+                    fast_models = ollama_provider.recommended_models.get("fast", [])
+                    available = getattr(ollama_provider, '_available_models', [])
+                    
+                    for fast_model in fast_models:
+                        # Проверяем доступность модели
+                        if any(fast_model in m for m in available):
+                            model_to_use = next((m for m in available if fast_model in m), None)
+                            if model_to_use:
+                                logger.info(f"Chat: Simple message -> using fast model: {model_to_use}")
+                                break
+                    
+                    # Fallback на gemma3:1b или qwen2.5:1.5b если не нашли
+                    if not model_to_use:
+                        for fallback in ["gemma3:1b", "qwen2.5:1.5b", "llama3.2:1b"]:
+                            if any(fallback in m for m in available):
+                                model_to_use = next((m for m in available if fallback in m), None)
+                                if model_to_use:
+                                    logger.info(f"Chat: Using fallback fast model: {model_to_use}")
+                                    break
+        
+        # Если указана модель явно, используем её
         if model_to_use:
             ollama_provider = llm_manager.providers.get("ollama")
             if ollama_provider:
                 # Временно меняем модель по умолчанию
                 original_model = ollama_provider.default_model
                 ollama_provider.default_model = model_to_use
-                logger.info(f"Chat: Using manually selected model: {model_to_use}")
+                logger.info(f"Chat: Using model: {model_to_use}")
         
         # Генерируем ответ
         response = await llm_manager.generate(
@@ -212,6 +239,14 @@ async def chat(request: Request, chat_request: ChatRequest):
             if ollama_provider and 'original_model' in locals():
                 ollama_provider.default_model = original_model
         
+        # Определяем, была ли использована быстрая модель
+        used_fast_model = (
+            complexity_info and 
+            complexity_info.level.value in ["trivial", "simple"] and
+            response.model and
+            any(x in response.model.lower() for x in ["1b", "1.5b", "2b"])
+        )
+        
         return ChatResponse(
             success=True,
             message=response.content,
@@ -224,7 +259,9 @@ async def chat(request: Request, chat_request: ChatRequest):
                 "thinking": getattr(response, 'thinking', None),
                 "web_search_used": bool(web_context),
                 "complexity_level": complexity_info.level.value if complexity_info else None,
-                "estimated_minutes": complexity_info.estimated_minutes if complexity_info else None
+                "estimated_minutes": complexity_info.estimated_minutes if complexity_info else None,
+                "smart_model_selection": True,  # Показываем что использовался умный выбор
+                "used_fast_model": used_fast_model  # Была ли использована быстрая модель
             }
         )
         
