@@ -6,7 +6,7 @@ import httpx
 import json
 import re
 import time
-from typing import List, Optional, AsyncIterator
+from typing import List, Optional, AsyncIterator, Dict, Any
 from ..core.logger import get_logger
 logger = get_logger(__name__)
 
@@ -89,39 +89,49 @@ class OllamaProvider(BaseLLMProvider):
                 logger.warning("Ollama server not responding, but provider initialized")
                 self._available_models = []
             
-            # Set default model if not available
-            if self.default_model and self.default_model not in self._available_models:
+            # Set default model if not set or not available
+            if not self.default_model or (self.default_model and self.default_model not in self._available_models):
                 if self._available_models:
-                    # Пробуем найти модель из recommended_models (приоритет для chat)
+                    # Try to find model from recommended_models (priority for chat)
                     fallback_model = None
                     
-                    # Сначала пробуем найти модель из recommended_models для chat
+                    # First try to find model from recommended_models for chat
                     if self.recommended_models and "chat" in self.recommended_models:
                         for recommended in self.recommended_models["chat"]:
-                            if recommended in self._available_models:
-                                fallback_model = recommended
-                                break
-                    
-                    # Если не нашли в chat, пробуем другие категории
-                    if not fallback_model and self.recommended_models:
-                        for category, models in self.recommended_models.items():
-                            if category == "chat":
-                                continue  # Уже проверили
-                            for recommended in models:
-                                if recommended in self._available_models:
-                                    fallback_model = recommended
+                            # Support partial matching (e.g., "gemma3" matches "gemma3:1b")
+                            for available in self._available_models:
+                                if recommended in available or available.startswith(recommended):
+                                    fallback_model = available
                                     break
                             if fallback_model:
                                 break
                     
-                    # Если не нашли в recommended, используем первую доступную
+                    # If not found in chat, try other categories
+                    if not fallback_model and self.recommended_models:
+                        for category, models in self.recommended_models.items():
+                            if category == "chat":
+                                continue  # Already checked
+                            for recommended in models:
+                                for available in self._available_models:
+                                    if recommended in available or available.startswith(recommended):
+                                        fallback_model = available
+                                        break
+                                if fallback_model:
+                                    break
+                            if fallback_model:
+                                break
+                    
+                    # If not found in recommended, use first available
                     if not fallback_model:
                         fallback_model = self._available_models[0]
                     
-                    logger.warning(
-                        f"Default model '{self.default_model}' not available. "
-                        f"Using '{fallback_model}' instead."
-                    )
+                    if self.default_model:
+                        logger.warning(
+                            f"Default model '{self.default_model}' not available. "
+                            f"Using '{fallback_model}' instead."
+                        )
+                    else:
+                        logger.info(f"Auto-detected default model: '{fallback_model}'")
                     self.default_model = fallback_model
         except Exception as e:
             logger.warning(f"Failed to connect to Ollama: {e}")
@@ -214,6 +224,83 @@ class OllamaProvider(BaseLLMProvider):
         # Проверяем, содержит ли имя модели ключевые слова
         model_lower = model_name.lower()
         return any(thinking_model.lower() in model_lower for thinking_model in thinking_models)
+    
+    def _parse_ndjson_response(self, response_text: str) -> Optional[Dict[str, Any]]:
+        """
+        Parse NDJSON (Newline Delimited JSON) response from Ollama.
+        Ollama streaming responses contain multiple JSON objects separated by newlines.
+        
+        Args:
+            response_text: Raw response text containing NDJSON
+            
+        Returns:
+            Merged response dict with combined content, or None if parsing fails
+        """
+        content_parts = []
+        final_data = None
+        
+        for line in response_text.strip().split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            
+            try:
+                obj = json.loads(line)
+                if isinstance(obj, dict):
+                    # Extract content from message
+                    if "message" in obj and isinstance(obj["message"], dict):
+                        msg_content = obj["message"].get("content", "")
+                        if msg_content:
+                            content_parts.append(msg_content)
+                    elif "content" in obj:
+                        content_parts.append(obj["content"])
+                    # Keep the last object for metadata (done, model, eval_count, etc.)
+                    final_data = obj
+            except json.JSONDecodeError:
+                continue
+        
+        if content_parts and final_data:
+            # Combine all content parts
+            combined_content = "".join(content_parts)
+            if "message" in final_data and isinstance(final_data["message"], dict):
+                final_data["message"]["content"] = combined_content
+            else:
+                final_data["message"] = {"content": combined_content}
+            logger.debug(f"Parsed {len(content_parts)} NDJSON chunks")
+            return final_data
+        
+        if final_data:
+            return final_data
+        
+        # Fallback: try regex extraction for malformed responses
+        return self._extract_content_regex(response_text)
+    
+    def _extract_content_regex(self, text: str) -> Optional[Dict[str, Any]]:
+        """
+        Fallback content extraction using regex for malformed JSON.
+        
+        Args:
+            text: Raw response text
+            
+        Returns:
+            Dict with extracted content or None
+        """
+        patterns = [
+            r'"message"\s*:\s*\{[^}]*"content"\s*:\s*"((?:[^"\\]|\\.)*)"',
+            r'"content"\s*:\s*"((?:[^"\\]|\\.)*)"',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text, re.DOTALL)
+            if match:
+                content = match.group(1)
+                # Decode escape sequences
+                content = content.replace('\\n', '\n').replace('\\t', '\t')
+                content = content.replace('\\"', '"').replace('\\\\', '\\')
+                logger.debug("Extracted content using regex fallback")
+                return {"message": {"content": content}}
+        
+        return None
     
     def _enhance_prompt_for_thinking(self, messages: List[LLMMessage], thinking_mode: bool, model_name: str) -> List[LLMMessage]:
         """
@@ -361,111 +448,14 @@ Show your reasoning process clearly. Think deeply before providing your final an
             content = ""
             
             try:
-                # Пробуем стандартный парсинг
+                # Try standard parsing first
                 data = response.json()
             except json.JSONDecodeError as json_error:
-                # Если JSON невалидный (Extra data), пробуем извлечь валидный JSON объект
-                logger.debug(f"Standard JSON parsing failed: {json_error}, attempting alternative parsing")
+                # Ollama returns NDJSON (Newline Delimited JSON) for streaming-like responses
+                # Optimized parsing using efficient NDJSON approach
+                logger.debug(f"Standard JSON failed, parsing as NDJSON: {json_error}")
                 
-                # Ollama может возвращать несколько JSON объектов в одном ответе (streaming-like)
-                # Пробуем найти последний полный JSON объект (он содержит финальный ответ)
-                lines = response_text.strip().split('\n')
-                parsed_objects = []
-                
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    
-                    # Пробуем найти JSON объект в строке
-                    json_start = line.find('{')
-                    if json_start >= 0:
-                        # Находим закрывающую скобку для JSON объекта
-                        brace_count = 0
-                        json_end = json_start
-                        for i, char in enumerate(line[json_start:], start=json_start):
-                            if char == '{':
-                                brace_count += 1
-                            elif char == '}':
-                                brace_count -= 1
-                                if brace_count == 0:
-                                    json_end = i + 1
-                                    break
-                        
-                        if json_end > json_start:
-                            try:
-                                json_str = line[json_start:json_end]
-                                parsed_obj = json.loads(json_str)
-                                parsed_objects.append(parsed_obj)
-                            except json.JSONDecodeError:
-                                continue
-                
-                # Если парсили множественные объекты (streaming response), собираем content из всех
-                if parsed_objects:
-                    if len(parsed_objects) > 1:
-                        # Streaming response - собираем content из всех объектов
-                        content_parts = []
-                        final_data = None
-                        for obj in parsed_objects:
-                            if isinstance(obj, dict):
-                                # Собираем content из каждого объекта
-                                if "message" in obj and isinstance(obj["message"], dict):
-                                    msg_content = obj["message"].get("content", "")
-                                    if msg_content:
-                                        content_parts.append(msg_content)
-                                elif "content" in obj:
-                                    content_parts.append(obj["content"])
-                                # Сохраняем последний объект для метаданных
-                                final_data = obj
-                        
-                        # Объединяем все части content
-                        if content_parts:
-                            combined_content = "".join(content_parts)
-                            # Обновляем последний объект с объединенным content
-                            if final_data:
-                                if "message" in final_data:
-                                    final_data["message"]["content"] = combined_content
-                                else:
-                                    final_data["content"] = combined_content
-                            data = final_data
-                            logger.debug(f"Successfully parsed {len(parsed_objects)} JSON object(s) and combined content")
-                        else:
-                            # Если не нашли content, используем последний объект
-                            data = parsed_objects[-1]
-                            logger.debug(f"Successfully parsed {len(parsed_objects)} JSON object(s) from response")
-                    else:
-                        # Один объект - используем как есть
-                        data = parsed_objects[0]
-                        logger.debug(f"Successfully parsed 1 JSON object from response")
-                
-                # Если все еще не нашли валидный JSON, пробуем извлечь контент напрямую
-                if data is None:
-                    # Ищем поле "content" в тексте (может быть экранировано)
-                    content_patterns = [
-                        r'"message"\s*:\s*\{[^}]*"content"\s*:\s*"((?:[^"\\]|\\.)*)"',  # message.content
-                        r'"content"\s*:\s*"((?:[^"\\]|\\.)*)"',  # Стандартный JSON с экранированием
-                        r'"content"\s*:\s*"([^"]*)"',  # Простой вариант без экранирования
-                    ]
-                    
-                    extracted_content = None
-                    for pattern in content_patterns:
-                        content_match = re.search(pattern, response_text, re.DOTALL)
-                        if content_match:
-                            extracted_content = content_match.group(1)
-                            # Раскодируем escape-последовательности
-                            try:
-                                # Обрабатываем стандартные escape-последовательности
-                                extracted_content = extracted_content.replace('\\n', '\n').replace('\\t', '\t')
-                                extracted_content = extracted_content.replace('\\"', '"').replace("\\'", "'")
-                                extracted_content = extracted_content.replace('\\\\', '\\')
-                            except Exception as e:
-                                logger.debug(f"Failed to decode escape sequences: {e}")
-                                # Continue with original content
-                            break
-                    
-                    if extracted_content:
-                        data = {"message": {"content": extracted_content}}
-                        logger.debug("Extracted content using regex patterns")
+                data = self._parse_ndjson_response(response_text)
             
             # Извлекаем content с дополнительной проверкой
             if data:

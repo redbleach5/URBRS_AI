@@ -5,6 +5,9 @@ Monitoring router
 from fastapi import APIRouter, Request
 from typing import Dict, Any
 
+from ...core.logger import get_logger
+logger = get_logger(__name__)
+
 router = APIRouter()
 
 
@@ -95,7 +98,6 @@ async def get_debug_logs_info(request: Request):
 @router.get("/monitoring/check-availability")
 async def check_availability(request: Request):
     """Проверить доступность сервера и моделей LLM провайдеров"""
-    from loguru import logger
     import httpx
     from backend.config import get_config
     
@@ -190,7 +192,6 @@ async def check_availability(request: Request):
 @router.get("/monitoring/ollama/check")
 async def check_ollama_server(request: Request):
     """Проверить доступность Ollama сервера и получить список моделей"""
-    from loguru import logger
     import httpx
     from backend.config import get_config
     

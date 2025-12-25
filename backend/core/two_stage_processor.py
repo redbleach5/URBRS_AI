@@ -38,6 +38,18 @@ class TwoStageProcessor:
     2. Мощная модель - финальные решения, генерация, анализ
     """
     
+    # Паттерны быстрых моделей (приоритет от наименьшей к большей)
+    FAST_MODEL_PATTERNS = [
+        ":0.5b", ":1b", ":1.5b", ":2b", ":3b", ":4b",
+        "mini", "tiny", "small", "nano", "micro"
+    ]
+    
+    # Паттерны мощных моделей (приоритет от большей к меньшей)
+    POWERFUL_MODEL_PATTERNS = [
+        ":405b", ":236b", ":123b", ":70b", ":72b", ":65b",
+        ":34b", ":32b", ":27b", ":22b", ":14b", ":13b", ":12b", ":11b", ":8b", ":7b"
+    ]
+    
     def __init__(
         self,
         llm_manager: Optional[LLMProviderManager] = None,
@@ -62,6 +74,10 @@ class TwoStageProcessor:
         else:
             self.fast_provider = None
             self.powerful_provider = None
+        
+        # Кэш для моделей
+        self._fast_model_cache: Optional[str] = None
+        self._powerful_model_cache: Optional[str] = None
     
     def _find_fast_provider(self) -> Optional[str]:
         """Находит быстрый провайдер"""
@@ -86,6 +102,90 @@ class TwoStageProcessor:
         elif self.llm_manager.providers:
             return list(self.llm_manager.providers.keys())[0]
         return None
+    
+    async def _get_fast_model(self) -> Optional[str]:
+        """Находит быструю модель для первого этапа обработки"""
+        if self._fast_model_cache:
+            return self._fast_model_cache
+        
+        if not self.llm_manager or self.fast_provider != "ollama":
+            return None
+        
+        try:
+            ollama_provider = self.llm_manager.providers.get("ollama")
+            if not ollama_provider:
+                return None
+            
+            available_models = await ollama_provider.list_models()
+            if not available_models:
+                return None
+            
+            # Ищем маленькую модель по паттернам
+            for pattern in self.FAST_MODEL_PATTERNS:
+                for model in available_models:
+                    name = model.get("name", "").lower()
+                    if pattern in name:
+                        self._fast_model_cache = model.get("name")
+                        logger.info(f"TwoStageProcessor: found fast model: {self._fast_model_cache}")
+                        return self._fast_model_cache
+            
+            # Ищем по размеру < 10GB
+            for model in available_models:
+                size = model.get("size", 0)
+                if size and size < 10 * 1024 * 1024 * 1024:
+                    self._fast_model_cache = model.get("name")
+                    logger.info(f"TwoStageProcessor: found small model by size: {self._fast_model_cache}")
+                    return self._fast_model_cache
+            
+            return None
+        except Exception as e:
+            logger.debug(f"Could not find fast model: {e}")
+            return None
+    
+    async def _get_powerful_model(self) -> Optional[str]:
+        """Находит мощную модель для второго этапа обработки"""
+        if self._powerful_model_cache:
+            return self._powerful_model_cache
+        
+        if not self.llm_manager or self.powerful_provider != "ollama":
+            return None
+        
+        try:
+            ollama_provider = self.llm_manager.providers.get("ollama")
+            if not ollama_provider:
+                return None
+            
+            available_models = await ollama_provider.list_models()
+            if not available_models:
+                return None
+            
+            # Ищем большую модель по паттернам (от самых больших)
+            for pattern in self.POWERFUL_MODEL_PATTERNS:
+                for model in available_models:
+                    name = model.get("name", "").lower()
+                    if pattern in name:
+                        self._powerful_model_cache = model.get("name")
+                        logger.info(f"TwoStageProcessor: found powerful model: {self._powerful_model_cache}")
+                        return self._powerful_model_cache
+            
+            # Ищем по размеру > 15GB
+            largest_model = None
+            largest_size = 0
+            for model in available_models:
+                size = model.get("size", 0)
+                if size and size > largest_size:
+                    largest_size = size
+                    largest_model = model.get("name")
+            
+            if largest_model:
+                self._powerful_model_cache = largest_model
+                logger.info(f"TwoStageProcessor: using largest model: {self._powerful_model_cache}")
+                return self._powerful_model_cache
+            
+            return None
+        except Exception as e:
+            logger.debug(f"Could not find powerful model: {e}")
+            return None
     
     async def process(
         self,
@@ -191,6 +291,9 @@ class TwoStageProcessor:
                 "complexity": "medium"
             }
         
+        # Находим быструю модель
+        fast_model = await self._get_fast_model()
+        
         # Стандартный анализ задачи
         prompt = f"""Проанализируй задачу и определи:
 1. Тип задачи (coding, analysis, question, etc.)
@@ -214,13 +317,19 @@ class TwoStageProcessor:
                 LLMMessage(role="user", content=prompt)
             ]
             
+            # Генерируем с указанием быстрой модели (если найдена)
+            generation_kwargs = {
+                "messages": messages,
+                "provider_name": self.fast_provider,
+                "temperature": 0.2,
+                "max_tokens": 300
+            }
+            if fast_model:
+                generation_kwargs["model"] = fast_model
+                logger.debug(f"Using fast model for preprocessing: {fast_model}")
+            
             response = await asyncio.wait_for(
-                self.llm_manager.generate(
-                    messages=messages,
-                    provider_name=self.fast_provider,
-                    temperature=0.2,
-                    max_tokens=300
-                ),
+                self.llm_manager.generate(**generation_kwargs),
                 timeout=5.0  # Быстрая модель должна отвечать быстро
             )
             

@@ -223,8 +223,24 @@ def main():
         for file_path in find_files(pattern):
             safe_delete(file_path)
     
-    # 6. Удаление всех логов проекта
-    print(f"\n{GREEN}6. Удаление всех логов проекта...{NC}")
+    # 6. Очистка кэша контекста (cache/context/*.json)
+    print(f"\n{GREEN}6. Очистка кэша контекста...{NC}")
+    context_cache_dir = root / 'cache' / 'context'
+    if context_cache_dir.exists():
+        json_files = list(context_cache_dir.glob('*.json'))
+        if json_files:
+            for json_file in json_files:
+                try:
+                    json_file.unlink()
+                    DELETED += 1
+                except Exception as e:
+                    print(f"{RED}Ошибка при удалении {json_file}:{NC} {e}")
+            print(f"{YELLOW}Очищен кэш контекста: {len(json_files)} файлов{NC}")
+        else:
+            print(f"{YELLOW}Кэш контекста пуст{NC}")
+    
+    # 7. Удаление всех логов проекта
+    print(f"\n{GREEN}7. Удаление всех логов проекта...{NC}")
     
     # Удаляем логи из ./logs/ (логи из централизованной системы логирования)
     logs_dir = root / 'logs'
@@ -277,8 +293,8 @@ def main():
         if log_file.is_file() and '.venv' not in str(log_file):
             safe_delete(log_file)
     
-    # 7. Удаляем PID файлы процессов
-    print(f"\n{GREEN}7. Удаление PID файлов...{NC}")
+    # 8. Удаляем PID файлы процессов
+    print(f"\n{GREEN}8. Удаление PID файлов...{NC}")
     pid_files = ['backend.pid', 'frontend.pid']
     for pid_file in pid_files:
         pid_path = root / pid_file
@@ -304,8 +320,8 @@ def main():
             except Exception as e:
                 print(f"{RED}Ошибка при удалении {pid_file}:{NC} {e}")
     
-    # 8. Удаляем резервные копии конфигурации (опционально)
-    print(f"\n{GREEN}8. Проверка резервных копий конфигурации...{NC}")
+    # 9. Удаляем резервные копии конфигурации (опционально)
+    print(f"\n{GREEN}9. Проверка резервных копий конфигурации...{NC}")
     config_backup_files = []
     # Проверяем backup файлы в backend/config/
     config_backup = root / 'backend' / 'config' / 'config.yaml.bak'
@@ -327,8 +343,8 @@ def main():
     else:
         print(f"{YELLOW}Резервные копии конфигурации не найдены{NC}")
     
-    # 9. Очистка кэша node_modules (если есть)
-    print(f"\n{GREEN}9. Очистка кэша node_modules...{NC}")
+    # 10. Очистка кэша node_modules (если есть)
+    print(f"\n{GREEN}10. Очистка кэша node_modules...{NC}")
     node_cache_dir = root / 'frontend' / 'node_modules' / '.cache'
     if node_cache_dir.exists():
         try:
@@ -340,8 +356,8 @@ def main():
     else:
         print(f"{YELLOW}Кэш node_modules не найден{NC}")
     
-    # 10. Очистка временных файлов и wrapper'ов (если есть)
-    print(f"\n{GREEN}10. Проверка временных файлов...{NC}")
+    # 11. Очистка временных файлов и wrapper'ов (если есть)
+    print(f"\n{GREEN}11. Проверка временных файлов...{NC}")
     # Удаляем временный wrapper для обратной совместимости (если был создан)
     loguru_wrapper = root / 'backend' / '_loguru_wrapper.py'
     if loguru_wrapper.exists():
@@ -349,11 +365,11 @@ def main():
         # Раскомментируйте для автоматического удаления:
         # safe_delete(loguru_wrapper)
     
-    # 11. Обновляем .gitignore если нужно
-    print(f"\n{GREEN}11. Проверка .gitignore...{NC}")
+    # 12. Обновляем .gitignore если нужно
+    print(f"\n{GREEN}12. Проверка .gitignore...{NC}")
     update_gitignore()
     
-    # 12. Показываем статистику
+    # 13. Показываем статистику
     print(f"\n{GREEN}✅ Очистка завершена!{NC}")
     print(f"{GREEN}Удалено файлов/директорий: {DELETED}{NC}")
     print(f"{YELLOW}Пропущено (не найдено или защищено): {SKIPPED}{NC}")

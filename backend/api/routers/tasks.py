@@ -26,7 +26,10 @@ class TaskResponse(BaseModel):
 
 @router.post("/tasks/execute", response_model=TaskResponse)
 async def execute_task(request: Request, task_request: Dict[str, Any]):
-    """Выполнить задачу (поддерживает задачи любой сложности)"""
+    """
+    Выполнить задачу (поддерживает задачи любой сложности)
+    НЕ блокирует сложные операции — только предупреждает пользователя.
+    """
     logger.debug(
         "API execute_task entry",
         extra={
@@ -40,6 +43,27 @@ async def execute_task(request: Request, task_request: Dict[str, Any]):
     
     if not engine:
         raise HTTPException(status_code=503, detail="Движок не инициализирован")
+    
+    # Анализируем сложность задачи ПЕРЕД выполнением (НЕ блокирует!)
+    complexity_warning = None
+    complexity_info = None
+    try:
+        from backend.core.complexity_analyzer import get_complexity_analyzer
+        analyzer = get_complexity_analyzer()
+        complexity_info = analyzer.analyze(
+            task=task_request.get("task", ""),
+            model=task_request.get("model"),
+            task_type=task_request.get("agent_type")
+        )
+        
+        if complexity_info.should_warn:
+            complexity_warning = complexity_info.warning_message
+            logger.info(
+                f"Task complexity: {complexity_info.level.value}, "
+                f"~{complexity_info.estimated_minutes:.1f} min - PROCEEDING (not blocking)"
+            )
+    except Exception as e:
+        logger.debug(f"Complexity analysis failed (non-critical): {e}")
     
     try:
         # Validate input
@@ -87,12 +111,21 @@ async def execute_task(request: Request, task_request: Dict[str, Any]):
             "metadata": {}
         }
         
-        # Добавляем оценку времени и предупреждения если есть
+        # Добавляем предупреждение о сложности (из нашего анализа или из результата)
+        if complexity_warning:
+            response_data["warning"] = complexity_warning
+        elif result.get("time_estimate") and result["time_estimate"].get("warning"):
+            response_data["warning"] = result["time_estimate"]["warning"]
+        
+        # Добавляем оценку времени
         if result.get("time_estimate"):
             response_data["time_estimate"] = result["time_estimate"]
-            if result["time_estimate"].get("warning"):
-                response_data["warning"] = result["time_estimate"]["warning"]
-                logger.warning(f"Time estimate warning: {result['time_estimate']['warning']}")
+        elif complexity_info:
+            response_data["time_estimate"] = {
+                "estimated_minutes": complexity_info.estimated_minutes,
+                "level": complexity_info.level.value,
+                "factors": complexity_info.factors
+            }
         
         # Добавляем метаданные для фронтенда
         if result.get("metadata"):
@@ -112,6 +145,12 @@ async def execute_task(request: Request, task_request: Dict[str, Any]):
         if result.get("recovered"):
             response_data["metadata"]["recovered"] = True
             response_data["metadata"]["recovery_method"] = result.get("recovery_method", "fallback_agent")
+        
+        # Добавляем информацию о сложности
+        if complexity_info:
+            response_data["metadata"]["complexity_level"] = complexity_info.level.value
+            response_data["metadata"]["estimated_minutes"] = complexity_info.estimated_minutes
+            response_data["metadata"]["complexity_analyzed"] = True
         
         logger.debug(
             "Before return TaskResponse",

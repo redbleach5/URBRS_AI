@@ -53,6 +53,7 @@ export interface ChatResponse {
   success: boolean;
   message: string;
   error?: string;
+  warning?: string;  // Предупреждение о сложности задачи
   metadata?: {
     model?: string;
     provider?: string;
@@ -60,6 +61,8 @@ export interface ChatResponse {
     has_thinking?: boolean;
     thinking?: string;
     web_search_used?: boolean;
+    complexity_level?: string;
+    estimated_minutes?: number;
   };
 }
 
@@ -104,26 +107,59 @@ export async function getStatus() {
     // Определяем тип ошибки для более детального сообщения
     let errorMessage = 'Не удалось подключиться к серверу';
     let errorType = 'connection_error';
+    let errorDetails = '';
+    let technicalInfo = '';
     
     if (error.code === 'ECONNABORTED') {
       errorMessage = 'Таймаут подключения к серверу';
       errorType = 'timeout';
+      errorDetails = 'Сервер не ответил в течение 5 секунд. Возможно, он перегружен или не запущен.';
     } else if (error.code === 'ECONNREFUSED') {
-      errorMessage = 'Сервер недоступен. Возможно, порт 8000 занят или backend не запущен';
+      errorMessage = 'Соединение отклонено';
       errorType = 'connection_refused';
-    } else if (error.message?.includes('Network Error') || error.message?.includes('address already in use')) {
-      errorMessage = 'Порт 8000 занят. Остановите другой процесс или измените порт в настройках';
+      errorDetails = 'Backend сервер не запущен или недоступен на порту 8000.';
+      technicalInfo = `Connection refused to ${API_BASE_URL}`;
+    } else if (error.code === 'ERR_NETWORK' || error.message?.includes('Network Error')) {
+      errorMessage = 'Ошибка сети';
+      errorType = 'network_error';
+      errorDetails = 'Не удалось установить соединение с backend сервером.';
+      technicalInfo = error.message || 'Network Error';
+    } else if (error.message?.includes('address already in use')) {
+      errorMessage = 'Порт занят';
       errorType = 'port_in_use';
+      errorDetails = 'Порт 8000 уже используется другим процессом.';
     } else if (error.response) {
-      errorMessage = error.response.data?.detail || error.response.data?.message || `Ошибка сервера: ${error.response.status}`;
-      errorType = 'server_error';
+      // Сервер ответил с ошибкой
+      const status = error.response.status;
+      const data = error.response.data;
+      
+      if (status === 500) {
+        errorMessage = 'Внутренняя ошибка сервера';
+        errorType = 'server_error';
+        errorDetails = data?.detail || data?.message || 'Backend вернул ошибку 500';
+        technicalInfo = JSON.stringify(data, null, 2);
+      } else if (status === 502 || status === 503) {
+        errorMessage = 'Сервер недоступен';
+        errorType = 'service_unavailable';
+        errorDetails = 'Backend временно недоступен или перезагружается.';
+      } else {
+        errorMessage = data?.detail || data?.message || `Ошибка сервера: ${status}`;
+        errorType = 'server_error';
+        technicalInfo = JSON.stringify(data, null, 2);
+      }
+    } else {
+      // Другие ошибки
+      technicalInfo = error.message || String(error);
     }
     
     return { 
       status: 'недоступен', 
       error: errorMessage,
       error_type: errorType,
-      initialized: false
+      error_details: errorDetails,
+      technical_info: technicalInfo,
+      initialized: false,
+      timestamp: new Date().toISOString()
     };
   }
 }

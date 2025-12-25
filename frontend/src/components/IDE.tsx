@@ -1,18 +1,17 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import Editor from '@monaco-editor/react';
-import { executeTask, executeTool, sendChat, getAvailableModels, selectModel, ModelInfo } from '../api/client';
+import { executeTask, executeTool, getAvailableModels, selectModel, ModelInfo } from '../api/client';
 import {
   Folder, FolderOpen, File, FileCode, FileJson, FileText, FileCog,
   Code, Code2, Terminal, Database, Globe, Lock,
   Brain, Target, Files, Search, Cpu, Sparkles,
   CircleCheck, CircleX, Clock, Loader2, BarChart3,
-  GitCommit, Play, Square, Plus, X, ChevronLeft, ChevronRight,
-  Trash2, History, Package, Layers, RefreshCw, Send, Download,
-  PanelLeft, ExternalLink, AlertCircle, ChevronUp,
+  GitCommit, Play, Plus, X, ChevronLeft, ChevronRight,
+  History, Package, Layers, AlertCircle, ChevronUp,
   type LucideIcon
 } from 'lucide-react';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const API_BASE_URL = 'http://localhost:8000';
 
 // Saved recent projects in localStorage
 const RECENT_PROJECTS_KEY = 'aillm_recent_projects';
@@ -184,7 +183,6 @@ export function IDE() {
   const [browserLoading, setBrowserLoading] = useState(false);
   
   const editorRef = useRef<any>(null);
-  const folderInputRef = useRef<HTMLInputElement>(null);
 
   // Load recent projects on mount
   useEffect(() => {
@@ -316,12 +314,6 @@ export function IDE() {
       browseDirViaAPI(dir.path);
     }
   }, [browseDirViaAPI, handleOpenProject]);
-
-  // Select from recent projects
-  const handleSelectRecentProject = useCallback((path: string) => {
-    setProjectPath(path);
-    setShowRecentProjects(false);
-  }, []);
 
   // Read file from project
   const handleFileClick = useCallback(async (file: FileInfo) => {
@@ -524,9 +516,38 @@ export function IDE() {
     return { language: 'python', extension: 'py', displayName: 'Python' };
   }, []);
 
-  // Generate code
+  // Определяет нужен ли специальный анализ проекта (SmartProjectAnalyzer)
+  const isProjectAnalysisRequest = useCallback((taskText: string): boolean => {
+    const lower = taskText.toLowerCase();
+    
+    // Паттерны для анализа проекта (запускают SmartProjectAnalyzer)
+    const analysisPatterns = [
+      'проанализируй проект', 'анализ проекта', 'проанализировать проект',
+      'изучи проект', 'посмотри проект', 'расскажи о проекте',
+      'что делает проект', 'как устроен проект', 'структура проекта',
+      'analyze project', 'project analysis', 'review project',
+      'ревью проекта', 'обзор проекта'
+    ];
+    
+    return analysisPatterns.some(pattern => lower.includes(pattern));
+  }, []);
+
+  // Generate code or execute task
   const handleGenerate = useCallback(async () => {
     if (!task.trim()) return;
+    
+    // Если это запрос на анализ проекта и проект открыт - запускаем SmartProjectAnalyzer
+    if (isProjectAnalysisRequest(task) && projectPath) {
+      setCustomQuestion(task);
+      setAnalysisType('comprehensive');
+      // Запускаем анализ через небольшую задержку (т.к. handleAnalyze определён ниже)
+      setTimeout(() => {
+        const analyzeBtn = document.querySelector('[data-analyze-trigger]') as HTMLButtonElement;
+        if (analyzeBtn) analyzeBtn.click();
+      }, 100);
+      return;
+    }
+    
     setGenerating(true);
     setError(null);
     setDetectedStack(null);
@@ -534,12 +555,18 @@ export function IDE() {
     try {
       const activeContent = openFiles.find(f => f.path === activeFile)?.content;
       
-      // Не передаём фиксированный язык - пусть бэкенд определит сам
-      // Передаём выбранную модель если не автовыбор
+      // НЕ указываем agent_type - пусть бэкенд сам выберет через LLMClassifier!
+      // Это позволяет использовать быстрые модели для понимания намерения пользователя
+      // Бэкенд использует: LLMClassifier -> кэш -> fallback на паттерны
+      
       const response = await executeTask({
         task,
-        agent_type: 'code_writer',
-        context: { existing_code: activeContent || '' },
+        // agent_type НЕ передаём - оркестратор выберет через LLM
+        context: { 
+          existing_code: activeContent || '',
+          project_path: projectPath || undefined,
+          has_project: !!projectTree
+        },
         model: autoSelectModel ? undefined : selectedModel || undefined,
         provider: autoSelectModel ? undefined : 'ollama'
       });
@@ -567,7 +594,7 @@ export function IDE() {
     } finally {
       setGenerating(false);
     }
-  }, [task, activeFile, openFiles, createNewFile, detectLanguageFromCode]);
+  }, [task, activeFile, openFiles, createNewFile, detectLanguageFromCode, isProjectAnalysisRequest, projectPath, projectTree, autoSelectModel, selectedModel]);
 
   // Run code
   const handleRun = useCallback(async () => {
@@ -855,6 +882,7 @@ export function IDE() {
           </button>
           {projectTree && (
             <button
+              data-analyze-trigger
               onClick={handleAnalyze}
               disabled={analyzing}
               className={`w-full px-2 py-1.5 text-xs text-left rounded flex items-center gap-2 transition-all ${
@@ -898,7 +926,7 @@ export function IDE() {
               type="text"
               value={task}
               onChange={(e) => setTask(e.target.value)}
-              placeholder="Опиши что создать: игра, API, скрипт, приложение..."
+              placeholder="Создай код, проанализируй проект, объясни как работает..."
               className="flex-1 bg-transparent text-sm text-white placeholder-gray-500 focus:outline-none"
               onKeyPress={(e) => e.key === 'Enter' && handleGenerate()}
             />

@@ -34,6 +34,7 @@ class ChatResponse(BaseModel):
     success: bool
     message: str
     error: Optional[str] = None
+    warning: Optional[str] = None  # Предупреждение о сложности
     metadata: Optional[Dict[str, Any]] = None
 
 
@@ -42,13 +43,20 @@ SYSTEM_PROMPTS = {
     "general": """Ты — универсальный AI-ассистент. Ты можешь:
 - Отвечать на любые вопросы
 - Шутить и поддерживать непринуждённую беседу
-- Искать информацию и давать сводки по новостям
 - Объяснять команды Linux, технологии, концепции
 - Помогать с повседневными задачами
 - Давать советы и рекомендации
 
-Отвечай на русском языке, будь дружелюбным и полезным.
-Используй эмодзи где уместно. Форматируй ответы с markdown для лучшей читаемости.
+ВАЖНЫЕ ПРАВИЛА:
+1. Отвечай ТОЛЬКО на русском языке. Не используй слова из других языков (вьетнамского, хинди, итальянского и т.д.)
+2. Если пользователь спрашивает о новостях или актуальных событиях:
+   - Если тебе предоставлен веб-контекст с реальными данными — используй его
+   - Если веб-контекста НЕТ — честно скажи: "У меня нет доступа к актуальным новостям. Мои знания ограничены датой обучения модели."
+   - НИКОГДА не выдумывай новости, события или факты!
+3. Если не знаешь ответ — так и скажи, не придумывай информацию.
+
+Будь дружелюбным и полезным. Используй эмодзи где уместно.
+Форматируй ответы с markdown для лучшей читаемости.
 Текущая дата: {current_date}""",
 
     "ide": """Ты — опытный программист и разработчик. Ты можешь:
@@ -88,6 +96,7 @@ async def chat(request: Request, chat_request: ChatRequest):
     """
     Простой чат без агентов — напрямую через LLM.
     Быстрые ответы для повседневных вопросов.
+    НЕ блокирует сложные операции — только предупреждает пользователя.
     """
     logger.info(f"Chat request: mode={chat_request.mode}, message_length={len(chat_request.message)}")
     
@@ -100,6 +109,24 @@ async def chat(request: Request, chat_request: ChatRequest):
     
     if not llm_manager:
         raise HTTPException(status_code=503, detail="LLM провайдер не доступен")
+    
+    # Анализируем сложность задачи (НЕ блокирует выполнение!)
+    complexity_warning = None
+    complexity_info = None
+    try:
+        from backend.core.complexity_analyzer import get_complexity_analyzer
+        analyzer = get_complexity_analyzer()
+        complexity_info = analyzer.analyze(
+            task=chat_request.message,
+            model=chat_request.model,
+            task_type=chat_request.mode
+        )
+        
+        if complexity_info.should_warn:
+            complexity_warning = complexity_info.warning_message
+            logger.info(f"Chat complexity warning: {complexity_info.level.value}, ~{complexity_info.estimated_minutes:.1f} min")
+    except Exception as e:
+        logger.debug(f"Complexity analysis failed (non-critical): {e}")
     
     try:
         # Формируем сообщения
@@ -188,13 +215,16 @@ async def chat(request: Request, chat_request: ChatRequest):
         return ChatResponse(
             success=True,
             message=response.content,
+            warning=complexity_warning,  # Предупреждение о сложности (если было)
             metadata={
                 "model": response.model,
                 "provider": getattr(response, 'provider', 'ollama'),
                 "mode": chat_request.mode,
                 "has_thinking": getattr(response, 'thinking', None) is not None,
                 "thinking": getattr(response, 'thinking', None),
-                "web_search_used": bool(web_context)
+                "web_search_used": bool(web_context),
+                "complexity_level": complexity_info.level.value if complexity_info else None,
+                "estimated_minutes": complexity_info.estimated_minutes if complexity_info else None
             }
         )
         

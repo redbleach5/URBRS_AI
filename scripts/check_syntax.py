@@ -31,10 +31,10 @@ def main():
     checked = 0
     
     # Directories to check (относительно корня проекта)
-    directories = ['backend', 'tests', 'examples']
+    directories = ['backend', 'tests', 'examples', 'scripts']
     
-    # Files to check (относительно корня проекта)
-    files = ['run.py', 'setup.py']
+    # Files to check (относительно корня проекта) - только существующие
+    files = []
     
     # Check directories
     for directory in directories:

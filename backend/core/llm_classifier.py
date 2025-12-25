@@ -90,16 +90,31 @@ AGENT_SELECTION_SCHEMA = {
 class LLMClassifier:
     """Универсальный классификатор на основе LLM"""
     
-    def __init__(self, llm_manager: Optional[LLMProviderManager] = None, cache_ttl: int = 3600):
+    # Быстрые модели для классификации (маленькие, но достаточные для понимания намерения)
+    FAST_CLASSIFICATION_MODELS = [
+        "qwen2.5:3b", "qwen2.5:1.5b", "qwen2:1.5b",
+        "llama3.2:1b", "llama3.2:3b", "gemma2:2b",
+        "phi3:mini", "phi3.5", "tinyllama", "orca-mini"
+    ]
+    
+    def __init__(
+        self, 
+        llm_manager: Optional[LLMProviderManager] = None, 
+        cache_ttl: int = 3600,
+        prefer_fast_model: bool = True
+    ):
         """
         Args:
             llm_manager: Менеджер LLM провайдеров
             cache_ttl: Время жизни кэша в секундах (по умолчанию 1 час)
+            prefer_fast_model: Использовать быструю модель для классификации
         """
         self.llm_manager = llm_manager
         self.cache: Dict[str, tuple] = {}  # key -> (value, expiry_time)
         self.cache_ttl = cache_ttl
+        self.prefer_fast_model = prefer_fast_model
         self._lock = asyncio.Lock()
+        self._fast_model_cache: Optional[str] = None
     
     async def classify(
         self,
@@ -135,10 +150,13 @@ class LLMClassifier:
             if cached:
                 return cached
         
-        # Выбираем провайдер
+        # Выбираем провайдер и модель
         selected_provider = provider or self._select_provider()
         if not selected_provider:
             return self._fallback_classification(text, classification_schema)
+        
+        # Выбираем быструю модель для классификации (если доступна)
+        fast_model = await self._get_fast_model(selected_provider) if self.prefer_fast_model else None
         
         # Формируем промпт
         prompt = self._build_classification_prompt(text, classification_schema)
@@ -150,13 +168,19 @@ class LLMClassifier:
                 LLMMessage(role="user", content=prompt)
             ]
             
+            # Используем быструю модель если доступна
+            generation_kwargs = {
+                "messages": messages,
+                "provider_name": selected_provider,
+                "temperature": 0.1,  # Низкая температура для детерминированности
+                "max_tokens": 300
+            }
+            if fast_model:
+                generation_kwargs["model"] = fast_model
+                logger.debug(f"Using fast model for classification: {fast_model}")
+            
             response = await asyncio.wait_for(
-                self.llm_manager.generate(
-                    messages=messages,
-                    provider_name=selected_provider,
-                    temperature=0.1,  # Низкая температура для детерминированности
-                    max_tokens=300
-                ),
+                self.llm_manager.generate(**generation_kwargs),
                 timeout=10.0
             )
             
@@ -239,11 +263,107 @@ JSON ответ:"""
         return self._fallback_classification(content, schema)
     
     def _fallback_classification(self, text: str, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Fallback классификация на основе эвристик"""
+        """Fallback классификация на основе эвристик (паттерн-матчинг)"""
         text_lower = text.lower()
         types = schema.get("types", {})
         
-        # Простая эвристика
+        # Умная классификация с учётом контекста
+        # Сначала проверяем специфичные комбинации слов
+        
+        # Явные маркеры анализа/исследования (высокий приоритет)
+        analysis_markers = [
+            "проанализируй проект", "анализ проекта", "изучи проект",
+            "структура проекта", "архитектура проекта", "обзор проекта",
+            "что делает проект", "как устроен", "ревью кода", "code review",
+            "analyze project", "project analysis", "review project"
+        ]
+        if any(marker in text_lower for marker in analysis_markers):
+            if "research" in types:
+                return {
+                    "type": "research",
+                    "confidence": 0.9,
+                    "reasoning": "Явный запрос на анализ проекта",
+                    "metadata": {"fallback": True, "explicit_match": True}
+                }
+        
+        # Явные маркеры генерации кода (высокий приоритет)
+        code_gen_with_target = False
+        gen_words = ["напиши", "создай", "сгенерируй", "generate", "create", "build", "make"]
+        code_targets = ["код", "code", "игру", "game", "приложение", "app", "скрипт", "script", 
+                       "функцию", "function", "класс", "class", "бот", "bot", "сайт", "site"]
+        
+        has_gen_word = any(w in text_lower for w in gen_words)
+        has_code_target = any(t in text_lower for t in code_targets)
+        
+        if has_gen_word and has_code_target:
+            if "code_writer" in types:
+                return {
+                    "type": "code_writer",
+                    "confidence": 0.85,
+                    "reasoning": "Генерация кода с явной целью",
+                    "metadata": {"fallback": True, "explicit_match": True}
+                }
+        
+        # Расширенные паттерны для агентов (используются если нет явного совпадения)
+        agent_patterns = {
+            "research": [
+                "найди", "поищи", "где находится", "как работает", "объясни",
+                "расскажи", "что такое", "покажи", "изучи", "проанализируй",
+                "find", "search", "explain", "analyze", "research", "review",
+                "документация", "структура", "архитектура", "последние версии",
+                "новости", "информация", "what is", "how does"
+            ],
+            "code_writer": [
+                "напиши код", "создай код", "реализуй", "добавь функцию",
+                "write code", "implement", "build", "develop",
+                "функцию для", "класс для", "скрипт для", "программу"
+            ],
+            "data_analysis": [
+                "проанализируй данные", "визуализация", "статистика", "график",
+                "analyze data", "visualization", "statistics", "chart", "plot",
+                "csv", "dataset", "dataframe", "pandas", "анализ данных"
+            ],
+            "react": [
+                "помоги разобраться", "подумай", "пошагово", "step by step",
+                "think through", "reason about", "help me figure"
+            ],
+            "workflow": [
+                "workflow", "пайплайн", "pipeline", "автоматизация", "automation",
+                "процесс", "последовательность действий"
+            ],
+            "integration": [
+                "интеграция", "подключи к", "синхронизация",
+                "integrate with", "connect to", "sync with"
+            ],
+            "monitoring": [
+                "мониторинг", "логи", "метрики", "диагностика",
+                "monitoring", "logs", "metrics", "diagnostics"
+            ]
+        }
+        
+        # Проверяем паттерны для агентов
+        best_match = None
+        best_confidence = 0.0
+        
+        for agent_type, patterns in agent_patterns.items():
+            if agent_type not in types:
+                continue
+            matches = sum(1 for p in patterns if p in text_lower)
+            if matches > 0:
+                confidence = min(0.75, 0.35 + matches * 0.15)
+                if confidence > best_confidence:
+                    best_confidence = confidence
+                    best_match = agent_type
+        
+        if best_match:
+            return {
+                "type": best_match,
+                "confidence": best_confidence,
+                "reasoning": f"Паттерн-матчинг: {best_match}",
+                "metadata": {"fallback": True, "pattern_based": True}
+            }
+        
+        # Общие паттерны для других схем
         if "привет" in text_lower or "hello" in text_lower or "hi" in text_lower:
             task_type = "simple_chat" if "simple_chat" in types else list(types.keys())[0]
         elif "?" in text:
@@ -251,11 +371,12 @@ JSON ответ:"""
         elif any(word in text_lower for word in ["создай", "напиши", "генерируй", "generate", "create"]):
             task_type = "generate" if "generate" in types else "execution_task" if "execution_task" in types else list(types.keys())[0]
         else:
-            task_type = list(types.keys())[0] if types else "unknown"
+            # По умолчанию: react (универсальный агент)
+            task_type = "react" if "react" in types else list(types.keys())[0] if types else "unknown"
         
         return {
             "type": task_type,
-            "confidence": 0.5,  # Низкая уверенность для fallback
+            "confidence": 0.4,  # Низкая уверенность для fallback
             "reasoning": f"Fallback классификация: {task_type}",
             "metadata": {"fallback": True}
         }
@@ -274,6 +395,80 @@ JSON ответ:"""
         # Fallback на первый доступный
         if self.llm_manager.providers:
             return list(self.llm_manager.providers.keys())[0]
+        
+        return None
+    
+    async def _get_fast_model(self, provider_name: str) -> Optional[str]:
+        """Выбирает самую быструю доступную модель для классификации"""
+        # Используем кэш если есть
+        if self._fast_model_cache:
+            return self._fast_model_cache
+        
+        if not self.llm_manager or provider_name != "ollama":
+            return None
+        
+        try:
+            # Получаем провайдер
+            ollama_provider = self.llm_manager.providers.get("ollama")
+            if not ollama_provider:
+                return None
+            
+            # Получаем список доступных моделей
+            available_models = await ollama_provider.list_models()
+            if not available_models:
+                return None
+            
+            available_model_names = [m.get("name", "") for m in available_models]
+            
+            # 1. Сначала ищем в списке известных быстрых моделей
+            for fast_model in self.FAST_CLASSIFICATION_MODELS:
+                for available in available_model_names:
+                    if fast_model in available or available.startswith(fast_model.split(":")[0]):
+                        self._fast_model_cache = available
+                        logger.info(f"Found fast classification model: {available}")
+                        return available
+            
+            # 2. Если не найдена — ищем любую маленькую модель по паттерну размера
+            small_model = self._find_small_model_by_size(available_models)
+            if small_model:
+                self._fast_model_cache = small_model
+                logger.info(f"Found small model by size pattern: {small_model}")
+                return small_model
+            
+            # 3. Если совсем ничего — возвращаем None (будет использована модель по умолчанию)
+            logger.debug(f"No fast model found, will use default. Available: {available_model_names[:5]}")
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Could not get fast model: {e}")
+            return None
+    
+    def _find_small_model_by_size(self, models: list) -> Optional[str]:
+        """
+        Находит маленькую модель по паттернам в имени или размеру.
+        
+        Паттерны маленьких моделей:
+        - :1b, :1.5b, :2b, :3b, :4b в имени
+        - mini, tiny, small, nano, micro в имени
+        - размер < 10GB (если доступна информация)
+        """
+        small_patterns = [
+            ":0.5b", ":1b", ":1.5b", ":2b", ":3b", ":4b",
+            "mini", "tiny", "small", "nano", "micro"
+        ]
+        
+        # Приоритет: сначала самые маленькие
+        for pattern in small_patterns:
+            for model in models:
+                name = model.get("name", "").lower()
+                if pattern in name:
+                    return model.get("name")
+        
+        # Если есть информация о размере — ищем < 10GB
+        for model in models:
+            size = model.get("size", 0)
+            if size and size < 10 * 1024 * 1024 * 1024:  # < 10GB
+                return model.get("name")
         
         return None
     

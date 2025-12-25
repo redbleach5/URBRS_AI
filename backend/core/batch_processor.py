@@ -11,22 +11,58 @@ from .exceptions import AILLMException
 
 
 class BatchProcessor:
-    """Process multiple tasks in batch"""
+    """Process multiple tasks in batch with auto-scaling support"""
     
     def __init__(
         self,
-        max_concurrent: int = 10,  # Увеличено для 30 моделей
-        model_selector: Optional[Any] = None
+        max_concurrent: int = 10,
+        model_selector: Optional[Any] = None,
+        resource_aware: bool = True
     ):
         """
         Initialize batch processor
         
         Args:
-            max_concurrent: Maximum concurrent tasks (увеличено для 30 моделей)
+            max_concurrent: Maximum concurrent tasks (base value)
             model_selector: SmartModelSelector для оптимизации выбора моделей
+            resource_aware: Auto-scale based on available resources
         """
+        self.base_max_concurrent = max_concurrent
         self.max_concurrent = max_concurrent
         self.model_selector = model_selector
+        self.resource_aware = resource_aware
+        self._resource_selector = None
+    
+    async def _auto_scale_concurrent(self) -> int:
+        """
+        Автоматически масштабирует max_concurrent под доступные ресурсы
+        Поддерживает multi-GPU конфигурации
+        """
+        if not self.resource_aware:
+            return self.base_max_concurrent
+        
+        try:
+            # Ленивая инициализация ResourceAwareSelector
+            if self._resource_selector is None:
+                from .resource_aware_selector import ResourceAwareSelector
+                self._resource_selector = ResourceAwareSelector()
+            
+            resources = await self._resource_selector.discover_resources()
+            
+            # Используем capacity из ResourceAwareSelector
+            scaled_concurrent = max(self.base_max_concurrent, resources.estimated_capacity)
+            
+            if scaled_concurrent != self.max_concurrent:
+                logger.info(
+                    f"Auto-scaled max_concurrent: {self.max_concurrent} -> {scaled_concurrent} "
+                    f"(GPUs: {resources.gpu_count}, VRAM: {resources.total_gpu_memory_gb or 0:.1f} GB)"
+                )
+                self.max_concurrent = scaled_concurrent
+            
+            return self.max_concurrent
+        except Exception as e:
+            logger.warning(f"Failed to auto-scale: {e}, using base value")
+            return self.base_max_concurrent
     
     async def process_batch(
         self,
@@ -45,7 +81,9 @@ class BatchProcessor:
         Returns:
             List of results
         """
-        semaphore = asyncio.Semaphore(min(self.max_concurrent, len(tasks)))
+        # Авто-масштабирование под доступные ресурсы
+        max_concurrent = await self._auto_scale_concurrent()
+        semaphore = asyncio.Semaphore(min(max_concurrent, len(tasks)))
         results = []
         
         async def process_with_semaphore(task_data: Dict[str, Any], index: int):
@@ -166,13 +204,16 @@ class BatchProcessor:
             List of results
         """
         async def process_code_request(request: Dict[str, Any]):
+            # Не указываем agent_type жёстко - пусть система сама решает
+            # Это позволяет batch обрабатывать разные типы задач
             return await engine.execute_task(
                 task=request["task"],
-                agent_type="code_writer",
+                agent_type=request.get("agent_type"),  # Берём из запроса если есть
                 context={
                     "file_path": request.get("file_path"),
                     "existing_code": request.get("existing_code"),
-                    "requirements": request.get("requirements")
+                    "requirements": request.get("requirements"),
+                    "batch_mode": True
                 }
             )
         

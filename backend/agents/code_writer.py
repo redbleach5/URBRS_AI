@@ -133,12 +133,33 @@ GUIDELINES:
                     def _detect_language(task_text: str) -> Tuple[Optional[str], Optional[str]]:
                         """
                         Very lightweight heuristic detector: scans task text for known language names/aliases.
+                        Also detects visual/web projects that should use HTML/CSS/JS.
                         Returns (language, matched_alias).
                         """
+                        text_lower = task_text.lower()
+                        
+                        # First check for explicit visual/web indicators → HTML/CSS/JS
+                        visual_indicators = [
+                            "неоновый", "neon", "стиль", "дизайн", "интерфейс", "ui", 
+                            "веб", "web", "сайт", "site", "страниц", "page", "браузер", "browser",
+                            "html", "css", "анимац", "animat", "красив", "визуал",
+                            "кнопк", "button", "форм", "form", "меню", "menu"
+                        ]
+                        # Games with visual style should be HTML/CSS/JS
+                        is_visual_game = ("игр" in text_lower or "game" in text_lower) and any(
+                            ind in text_lower for ind in ["неоновый", "neon", "стиль", "красив", "визуал", "3d", "2d", "график", "graphic"]
+                        )
+                        if is_visual_game or any(ind in text_lower for ind in visual_indicators):
+                            # Check it's not explicitly asking for another language
+                            explicit_langs = ["python", "питон", "py ", "java ", "c++", "c#", "rust", "go ", "golang"]
+                            if not any(lang in text_lower for lang in explicit_langs):
+                                return "html", "visual/web project"
+                        
                         lang_map = {
                             "python": ["python", "питон", "py"],
                             "javascript": ["javascript", "js", "жс"],
                             "typescript": ["typescript", "ts"],
+                            "html": ["html", "css", "веб-страниц", "webpage"],
                             "go": ["go", "golang", "го", "голанг"],
                             "java": ["java", "ява"],
                             "c#": ["c#", "c sharp", "c-шарп", "си шарп"],
@@ -159,7 +180,7 @@ GUIDELINES:
                             "julia": ["julia"],
                             "sql": ["sql"],
                         }
-                        text = f" {task_text.lower()} "
+                        text = f" {text_lower} "
                         for lang, aliases in lang_map.items():
                             for alias in aliases:
                                 if f" {alias} " in text:

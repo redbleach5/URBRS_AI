@@ -30,7 +30,17 @@ export function LearningProgress() {
   const [data, setData] = useState<LearningData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [isExpanded, setIsExpanded] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(() => {
+    const saved = localStorage.getItem('learningProgressExpanded');
+    return saved === 'true';
+  });
+
+  // Save expanded state
+  const toggleExpanded = () => {
+    const newValue = !isExpanded;
+    setIsExpanded(newValue);
+    localStorage.setItem('learningProgressExpanded', newValue.toString());
+  };
 
   const fetchLearningProgress = useCallback(async () => {
     try {
@@ -58,10 +68,10 @@ export function LearningProgress() {
 
   if (loading) {
     return (
-      <div className="p-4 bg-gradient-to-br from-indigo-900/30 to-purple-900/20 border border-indigo-500/30 rounded-xl">
+      <div className="p-2.5 bg-gradient-to-br from-indigo-900/30 to-purple-900/20 border border-indigo-500/30 rounded-lg">
         <div className="flex items-center gap-2 text-indigo-300">
-          <Loader2 size={16} strokeWidth={1.5} className="animate-spin" />
-          <span className="text-sm">Загрузка статистики обучения...</span>
+          <Loader2 size={14} strokeWidth={1.5} className="animate-spin" />
+          <span className="text-xs">Загрузка...</span>
         </div>
       </div>
     );
@@ -69,10 +79,10 @@ export function LearningProgress() {
 
   if (error || !data?.success || !data.progress) {
     return (
-      <div className="p-4 bg-gradient-to-br from-red-900/20 to-orange-900/10 border border-red-500/20 rounded-xl">
+      <div className="p-2.5 bg-gradient-to-br from-red-900/20 to-orange-900/10 border border-red-500/20 rounded-lg">
         <div className="flex items-center gap-2 text-red-300">
-          <AlertTriangle size={16} strokeWidth={1.5} />
-          <span className="text-sm">{error || 'Нет данных об обучении'}</span>
+          <AlertTriangle size={14} strokeWidth={1.5} />
+          <span className="text-xs truncate">{error || 'Нет данных'}</span>
         </div>
       </div>
     );
@@ -101,60 +111,60 @@ export function LearningProgress() {
   };
 
   return (
-    <div className="p-4 bg-gradient-to-br from-indigo-900/30 to-purple-900/20 border border-indigo-500/30 rounded-xl shadow-lg">
+    <div className="p-2.5 bg-gradient-to-br from-indigo-900/30 to-purple-900/20 border border-indigo-500/30 rounded-lg shadow-lg">
       {/* Header */}
       <div 
         className="flex items-center justify-between cursor-pointer"
-        onClick={() => setIsExpanded(!isExpanded)}
+        onClick={toggleExpanded}
       >
-        <div className="flex items-center gap-3">
-          <Brain size={24} strokeWidth={1.5} className="text-indigo-400" />
-          <div>
-            <h3 className="text-sm font-semibold text-indigo-200">Система обучения</h3>
-            <p className="text-xs text-indigo-400">{progress.level_description}</p>
+        <div className="flex items-center gap-2">
+          <Brain size={18} strokeWidth={1.5} className="text-indigo-400 flex-shrink-0" />
+          <div className="min-w-0">
+            <h3 className="text-xs font-semibold text-indigo-200">Обучение</h3>
+            <p className="text-[10px] text-indigo-400 truncate">{progress.level_description}</p>
           </div>
         </div>
         
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-1.5 flex-shrink-0">
           {/* Level badge */}
-          <div className={`px-3 py-1 rounded-full text-xs font-bold text-white bg-gradient-to-r ${getLevelColor(progress.level)}`}>
+          <div className={`px-2 py-0.5 rounded-full text-[10px] font-bold text-white bg-gradient-to-r ${getLevelColor(progress.level)}`}>
             {progress.level.toUpperCase()}
           </div>
           
           {/* Expand icon */}
-          <ChevronDown size={16} strokeWidth={1.5} className={`text-indigo-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+          <ChevronDown size={14} strokeWidth={1.5} className={`text-indigo-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
         </div>
       </div>
 
-      {/* Main stats */}
-      <div className="mt-4 grid grid-cols-4 gap-3">
-        <div className="text-center p-2 bg-black/20 rounded-lg">
-          <div className="text-xl font-bold text-white">{progress.total_experience}</div>
-          <div className="text-xs text-indigo-300">Задач обработано</div>
+      {/* Main stats - 2x2 grid for narrow sidebar */}
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <div className="text-center p-1.5 bg-black/20 rounded-lg">
+          <div className="text-lg font-bold text-white">{progress.total_experience}</div>
+          <div className="text-[10px] text-indigo-300">Задач</div>
         </div>
-        <div className="text-center p-2 bg-black/20 rounded-lg">
-          <div className={`text-xl font-bold ${getQualityColor(progress.quality)}`}>
+        <div className="text-center p-1.5 bg-black/20 rounded-lg">
+          <div className={`text-lg font-bold ${getQualityColor(progress.quality)}`}>
             {(progress.success_rate * 100).toFixed(0)}%
           </div>
-          <div className="text-xs text-indigo-300">Success Rate</div>
+          <div className="text-[10px] text-indigo-300">Успех</div>
         </div>
-        <div className="text-center p-2 bg-black/20 rounded-lg">
-          <div className="text-xl font-bold text-green-400">{progress.total_successful}</div>
-          <div className="text-xs text-indigo-300">Успешных</div>
+        <div className="text-center p-1.5 bg-black/20 rounded-lg">
+          <div className="text-lg font-bold text-green-400">{progress.total_successful}</div>
+          <div className="text-[10px] text-indigo-300">Успешных</div>
         </div>
-        <div className="text-center p-2 bg-black/20 rounded-lg">
-          <div className="text-xl font-bold text-yellow-400">{progress.total_retries}</div>
-          <div className="text-xs text-indigo-300">Исправлений</div>
+        <div className="text-center p-1.5 bg-black/20 rounded-lg">
+          <div className="text-lg font-bold text-yellow-400">{progress.total_retries}</div>
+          <div className="text-[10px] text-indigo-300">Исправлений</div>
         </div>
       </div>
 
       {/* Progress bar */}
-      <div className="mt-4">
-        <div className="flex justify-between text-xs text-indigo-300 mb-1">
-          <span>Прогресс обучения</span>
+      <div className="mt-2.5">
+        <div className="flex justify-between text-[10px] text-indigo-300 mb-0.5">
+          <span>Прогресс</span>
           <span>{Math.min(progress.total_experience / 200 * 100, 100).toFixed(0)}%</span>
         </div>
-        <div className="h-2 bg-black/30 rounded-full overflow-hidden">
+        <div className="h-1.5 bg-black/30 rounded-full overflow-hidden">
           <div 
             className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 transition-all duration-500"
             style={{ width: `${Math.min(progress.total_experience / 200 * 100, 100)}%` }}
@@ -164,25 +174,21 @@ export function LearningProgress() {
 
       {/* Expanded: Agent details */}
       {isExpanded && agents_summary && Object.keys(agents_summary).length > 0 && (
-        <div className="mt-4 pt-4 border-t border-indigo-500/20">
-          <h4 className="text-xs font-semibold text-indigo-300 mb-3">Статистика по агентам</h4>
-          <div className="space-y-2">
+        <div className="mt-2.5 pt-2.5 border-t border-indigo-500/20">
+          <h4 className="text-[10px] font-semibold text-indigo-300 mb-2">Агенты</h4>
+          <div className="space-y-1.5">
             {Object.entries(agents_summary).map(([name, stats]) => (
-              <div key={name} className="flex items-center justify-between p-2 bg-black/20 rounded-lg">
-                <div className="flex items-center gap-2">
-                  <Bot size={14} strokeWidth={1.5} className="text-indigo-300" />
-                  <span className="text-sm text-white">{name}</span>
+              <div key={name} className="p-1.5 bg-black/20 rounded-lg">
+                <div className="flex items-center gap-1.5 mb-1">
+                  <Bot size={12} strokeWidth={1.5} className="text-indigo-300 flex-shrink-0" />
+                  <span className="text-[11px] text-white font-medium truncate">{name}</span>
                 </div>
-                <div className="flex items-center gap-4 text-xs">
-                  <span className="text-indigo-300">
-                    {stats.tasks} задач
-                  </span>
+                <div className="flex items-center justify-between text-[10px]">
+                  <span className="text-indigo-300">{stats.tasks} задач</span>
                   <span className={stats.success_rate >= 0.8 ? 'text-green-400' : stats.success_rate >= 0.6 ? 'text-yellow-400' : 'text-red-400'}>
-                    {(stats.success_rate * 100).toFixed(0)}% успех
+                    {(stats.success_rate * 100).toFixed(0)}%
                   </span>
-                  <span className="text-purple-400">
-                    {stats.avg_quality.toFixed(0)} качество
-                  </span>
+                  <span className="text-purple-400">{stats.avg_quality.toFixed(0)}★</span>
                 </div>
               </div>
             ))}
@@ -191,8 +197,8 @@ export function LearningProgress() {
       )}
 
       {/* Quality indicator */}
-      <div className="mt-4 flex items-center justify-center gap-2 text-xs">
-        <span className="text-indigo-300">Качество обучения:</span>
+      <div className="mt-2.5 flex items-center justify-center gap-1.5 text-[10px]">
+        <span className="text-indigo-300">Качество:</span>
         <span className={`font-semibold ${getQualityColor(progress.quality)}`}>
           {progress.quality}
         </span>

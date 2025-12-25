@@ -74,9 +74,15 @@ app.openapi = lambda: custom_openapi(app)
 # CORS middleware
 config = get_config()
 if config.api.cors.get("enabled", True):
+    cors_origins = config.api.cors.get("origins", ["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173"])
+    # Security: if credentials=True, origins cannot be "*" - use specific origins
+    if cors_origins == ["*"] or "*" in cors_origins:
+        # For development, use common localhost ports; in production should be configured explicitly
+        cors_origins = ["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173", "http://localhost:8000"]
+        logger.warning("CORS origins set to '*' with credentials - using localhost defaults for security")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=config.api.cors.get("origins", ["*"]),
+        allow_origins=cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

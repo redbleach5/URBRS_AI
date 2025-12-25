@@ -131,10 +131,11 @@ class ProjectValidator:
         
         # Проверка что скрипты в scripts/ (исключая разрешенные скрипты запуска в корне)
         allowed_root_scripts = {
-            "start.sh",      # Скрипт запуска проекта (должен быть в корне)
-            "stop.sh",       # Скрипт остановки проекта (должен быть в корне)
+            "start.sh",      # Скрипт запуска проекта
+            "stop.sh",       # Скрипт остановки проекта
             "run.sh",        # Альтернативное имя скрипта запуска
-            "setup.sh"       # Скрипт первоначальной настройки
+            "setup.sh",      # Скрипт первоначальной настройки
+            "gui.sh"         # GUI панель управления
         }
         scripts_in_root = list(self.project_root.glob("*.sh")) + list(self.project_root.glob("*.py"))
         for script in scripts_in_root:
@@ -168,8 +169,10 @@ class ProjectValidator:
         python_files += list(self.scripts_dir.rglob("*.py"))
         
         for file_path in python_files:
-            # Пропускаем __pycache__ и .venv
+            # Пропускаем __pycache__, .venv и сам logger.py
             if "__pycache__" in str(file_path) or ".venv" in str(file_path):
+                continue
+            if file_path.name == "logger.py":
                 continue
             
             # Проверка синтаксиса

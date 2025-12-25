@@ -145,7 +145,8 @@ fi
 # Запуск frontend (Vite dev) на заданном порту
 echo ""
 echo "🎨 Запуск frontend (порт ${FRONTEND_PORT})..."
-# Vite автоматически использует порт из vite.config.ts, но мы переопределяем через --port
+# Передаём URL backend через переменную окружения (Vite подхватит VITE_API_BASE_URL)
+export VITE_API_BASE_URL="http://${BACKEND_HOST}:${BACKEND_PORT}/api/v1"
 (cd frontend && npm run dev -- --host 0.0.0.0 --port "$FRONTEND_PORT") > "$FRONTEND_LOG" 2>&1 &
 FRONTEND_PID=$!
 echo "   Frontend PID: $FRONTEND_PID"

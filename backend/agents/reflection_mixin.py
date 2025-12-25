@@ -294,8 +294,62 @@ class ReflectionMixin:
     def _parse_reflection_response(self, response: str) -> ReflectionResult:
         """Парсит ответ LLM в ReflectionResult"""
         try:
+            # Предварительная обработка: удаляем markdown-обёртки ```json ... ```
+            cleaned_response = response.strip()
+            # Удаляем markdown code blocks
+            cleaned_response = re.sub(r'^```(?:json)?\s*', '', cleaned_response)
+            cleaned_response = re.sub(r'\s*```$', '', cleaned_response)
+            cleaned_response = cleaned_response.strip()
+            
+            # Если ответ не начинается с {, но содержит JSON-поля - добавляем скобки
+            if not cleaned_response.startswith("{") and '"completeness"' in cleaned_response:
+                cleaned_response = "{" + cleaned_response + "}"
+            
             # Извлекаем JSON из ответа
-            json_match = re.search(r'\{[\s\S]*\}', response)
+            json_match = re.search(r'\{[\s\S]*\}', cleaned_response)
+            
+            # Попытка исправить неэкранированные кавычки внутри строк
+            if json_match:
+                json_str = json_match.group()
+                # Пробуем парсить, если ошибка - пытаемся исправить
+                try:
+                    json.loads(json_str)
+                except json.JSONDecodeError:
+                    # Заменяем неэкранированные кавычки внутри строковых значений
+                    # Паттерн: находим строковые значения и экранируем внутренние кавычки
+                    def fix_inner_quotes(s):
+                        # Простой фикс: заменяем "text "inner" text" на "text 'inner' text"
+                        # Это работает для большинства случаев с gemma3
+                        result = []
+                        in_string = False
+                        i = 0
+                        while i < len(s):
+                            char = s[i]
+                            if char == '"' and (i == 0 or s[i-1] != '\\'):
+                                if not in_string:
+                                    in_string = True
+                                    result.append(char)
+                                else:
+                                    # Проверяем, это конец строки или внутренняя кавычка
+                                    # Конец строки: после " идёт , или ] или } или пробел+один из них
+                                    rest = s[i+1:].lstrip()
+                                    if rest and rest[0] in ',]}:\n':
+                                        in_string = False
+                                        result.append(char)
+                                    else:
+                                        # Внутренняя кавычка - заменяем на одинарную
+                                        result.append("'")
+                            else:
+                                result.append(char)
+                            i += 1
+                        return ''.join(result)
+                    
+                    json_str = fix_inner_quotes(json_str)
+                    # Обновляем json_match с исправленным JSON
+                    class FixedMatch:
+                        def group(self): return json_str
+                    json_match = FixedMatch()
+            
             if not json_match:
                 raise ValueError("JSON not found in response")
             
@@ -551,6 +605,14 @@ class ReflectionMixin:
         result: Optional[Dict[str, Any]] = None
     ) -> None:
         """Записывает результат рефлексии в систему обучения с примером решения"""
+        # IMPORTANT: Do not record learning if reflection parsing failed
+        # This would pollute learning data with incorrect 50% scores
+        if reflection._parsing_failed:
+            logger.debug(
+                f"Agent {self.name}: Skipping learning record - reflection parsing failed"
+            )
+            return
+        
         try:
             # Извлекаем snippet из результата для few-shot learning
             solution_snippet = None

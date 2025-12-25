@@ -4,6 +4,7 @@ Web search and API tools
 
 import httpx
 import re
+import asyncio
 from typing import Dict, Any, List, Optional
 from ..core.logger import get_logger
 logger = get_logger(__name__)
@@ -13,8 +14,17 @@ from ..core.exceptions import ToolException
 from ..safety.guard import SafetyGuard
 
 
+# Try to use duckduckgo-search library (more reliable than HTML scraping)
+try:
+    from duckduckgo_search import DDGS
+    HAS_DDGS = True
+except ImportError:
+    HAS_DDGS = False
+    logger.warning("duckduckgo-search not installed. Install with: pip install duckduckgo-search")
+
+
 class WebSearchTool(BaseTool):
-    """Tool for web search using DuckDuckGo (no API key required)"""
+    """Tool for web search using DuckDuckGo"""
     
     def __init__(self, safety_guard=None):
         super().__init__(
@@ -23,99 +33,153 @@ class WebSearchTool(BaseTool):
             safety_guard=safety_guard
         )
         self.client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
-        self.base_url = "https://html.duckduckgo.com/html/"
     
-    async def _search_duckduckgo(self, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
+    async def _search_with_ddgs(self, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
         """
-        Search using DuckDuckGo HTML interface
+        Search using duckduckgo-search library (recommended method)
         
         Args:
             query: Search query
-            max_results: Maximum number of results to return
+            max_results: Maximum number of results
+            
+        Returns:
+            List of search results
+        """
+        if not HAS_DDGS:
+            return []
+        
+        try:
+            # Run sync DDGS in executor to not block async loop
+            def do_search():
+                with DDGS() as ddgs:
+                    results = list(ddgs.text(query, region='ru-ru', max_results=max_results))
+                    return results
+            
+            loop = asyncio.get_event_loop()
+            raw_results = await loop.run_in_executor(None, do_search)
+            
+            results = []
+            for item in raw_results:
+                results.append({
+                    "title": item.get("title", ""),
+                    "url": item.get("href", item.get("link", "")),
+                    "snippet": item.get("body", item.get("snippet", ""))
+                })
+            
+            logger.info(f"DDGS search returned {len(results)} results for: {query[:50]}")
+            return results
+            
+        except Exception as e:
+            logger.warning(f"DDGS search error: {e}")
+            return []
+    
+    async def _search_duckduckgo_lite(self, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
+        """
+        Fallback: Search using DuckDuckGo Lite (text-only, less likely to be blocked)
+        
+        Args:
+            query: Search query
+            max_results: Maximum number of results
             
         Returns:
             List of search results
         """
         try:
-            # DuckDuckGo HTML search
-            params = {
-                "q": query,
-                "kl": "ru-ru"  # Russian language
-            }
+            # DuckDuckGo Lite endpoint (simpler, text-only)
+            url = "https://lite.duckduckgo.com/lite/"
             
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
             }
             
-            response = await self.client.get(
-                self.base_url,
-                params=params,
-                headers=headers
-            )
+            data = {"q": query}
+            
+            response = await self.client.post(url, data=data, headers=headers)
             response.raise_for_status()
             
-            # Parse HTML results
             html = response.text
             results = []
             
-            # Extract results from DuckDuckGo HTML
-            # DuckDuckGo uses specific classes for results
-            title_pattern = r'<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]+)</a>'
-            snippet_pattern = r'<a[^>]*class="result__snippet"[^>]*>([^<]+)</a>'
+            # Parse lite results (simpler HTML structure)
+            # Pattern for lite version links
+            link_pattern = r'<a[^>]*rel="nofollow"[^>]*href="([^"]+)"[^>]*>([^<]+)</a>'
+            matches = re.findall(link_pattern, html)
             
-            titles = re.findall(title_pattern, html)
-            snippets = re.findall(snippet_pattern, html)
+            # Filter out DuckDuckGo internal links
+            for url, title in matches:
+                if url.startswith('http') and 'duckduckgo.com' not in url:
+                    results.append({
+                        "title": title.strip(),
+                        "url": url,
+                        "snippet": ""
+                    })
+                    if len(results) >= max_results:
+                        break
             
-            # Combine titles and snippets
-            for i, (url, title) in enumerate(titles[:max_results]):
-                snippet = snippets[i] if i < len(snippets) else ""
-                results.append({
-                    "title": title.strip(),
-                    "url": url,
-                    "snippet": snippet.strip()
-                })
-            
-            # If HTML parsing didn't work, try API endpoint (lite version)
-            if not results:
-                api_url = "https://api.duckduckgo.com/"
-                api_params = {
-                    "q": query,
-                    "format": "json",
-                    "no_html": "1",
-                    "skip_disambig": "1"
-                }
-                
-                api_response = await self.client.get(api_url, params=api_params, headers=headers)
-                api_response.raise_for_status()
-                api_data = api_response.json()
-                
-                # Extract from API response
-                if api_data.get("Results"):
-                    for result in api_data["Results"][:max_results]:
-                        results.append({
-                            "title": result.get("Text", ""),
-                            "url": result.get("FirstURL", ""),
-                            "snippet": result.get("Text", "")
-                        })
-                
-                # Also check RelatedTopics
-                if not results and api_data.get("RelatedTopics"):
-                    for topic in api_data["RelatedTopics"][:max_results]:
-                        if isinstance(topic, dict) and "FirstURL" in topic:
-                            results.append({
-                                "title": topic.get("Text", ""),
-                                "url": topic.get("FirstURL", ""),
-                                "snippet": topic.get("Text", "")
-                            })
-            
-            return results[:max_results]
+            return results
             
         except Exception as e:
-            logger.warning(f"DuckDuckGo search error: {e}")
+            logger.warning(f"DuckDuckGo Lite search error: {e}")
+            return []
+    
+    async def _search_duckduckgo_api(self, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
+        """
+        Fallback: Use DuckDuckGo Instant Answer API
+        Note: This API only returns instant answers, not web results
+        
+        Args:
+            query: Search query
+            max_results: Maximum number of results
+            
+        Returns:
+            List of search results
+        """
+        try:
+            api_url = "https://api.duckduckgo.com/"
+            params = {
+                "q": query,
+                "format": "json",
+                "no_html": "1",
+                "skip_disambig": "1"
+            }
+            
+            headers = {
+                "User-Agent": "AILLM/1.0 (AI Assistant)"
+            }
+            
+            response = await self.client.get(api_url, params=params, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            
+            results = []
+            
+            # Abstract (main answer)
+            if data.get("Abstract"):
+                results.append({
+                    "title": data.get("Heading", "Answer"),
+                    "url": data.get("AbstractURL", ""),
+                    "snippet": data.get("Abstract", "")
+                })
+            
+            # Related topics
+            for topic in data.get("RelatedTopics", [])[:max_results - len(results)]:
+                if isinstance(topic, dict) and "FirstURL" in topic:
+                    results.append({
+                        "title": topic.get("Text", "")[:100],
+                        "url": topic.get("FirstURL", ""),
+                        "snippet": topic.get("Text", "")
+                    })
+            
+            return results
+            
+        except Exception as e:
+            logger.warning(f"DuckDuckGo API error: {e}")
             return []
     
     async def execute(self, input_data: Dict[str, Any]) -> ToolOutput:
-        """Search the web"""
+        """Search the web using multiple methods"""
         query = input_data.get("query")
         max_results = input_data.get("max_results", 10)
         
@@ -123,10 +187,24 @@ class WebSearchTool(BaseTool):
             return ToolOutput(success=False, result=None, error="query required")
         
         if max_results > 20:
-            max_results = 20  # Limit to 20 results
+            max_results = 20
         
         try:
-            results = await self._search_duckduckgo(query, max_results)
+            results = []
+            
+            # Method 1: Use duckduckgo-search library (best)
+            if HAS_DDGS:
+                results = await self._search_with_ddgs(query, max_results)
+            
+            # Method 2: DuckDuckGo Lite (fallback)
+            if not results:
+                logger.info("Trying DuckDuckGo Lite fallback...")
+                results = await self._search_duckduckgo_lite(query, max_results)
+            
+            # Method 3: DuckDuckGo Instant Answer API (last resort)
+            if not results:
+                logger.info("Trying DuckDuckGo API fallback...")
+                results = await self._search_duckduckgo_api(query, max_results)
             
             if not results:
                 return ToolOutput(
@@ -134,7 +212,7 @@ class WebSearchTool(BaseTool):
                     result={
                         "query": query,
                         "results": [],
-                        "message": "No results found. Try a different query."
+                        "message": "Поиск не дал результатов. DuckDuckGo может блокировать запросы. Установите duckduckgo-search: pip install duckduckgo-search"
                     }
                 )
             

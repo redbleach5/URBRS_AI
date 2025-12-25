@@ -31,9 +31,12 @@ class ResourceInfo:
     level: ResourceLevel
     available_models: List[str]
     gpu_memory_gb: Optional[float] = None
+    gpu_count: int = 1  # Количество GPU
+    total_gpu_memory_gb: Optional[float] = None  # Суммарная память всех GPU
     cpu_cores: Optional[int] = None
     total_memory_gb: Optional[float] = None
     estimated_capacity: int = 1  # Количество параллельных запросов
+    can_run_large_models: bool = False  # Может ли запускать 70B+ модели
 
 
 @dataclass
@@ -110,7 +113,7 @@ class ResourceAwareSelector:
         resource_level = self._determine_resource_level(available_models)
         
         # Оцениваем GPU память (если доступно)
-        gpu_memory = await self._estimate_gpu_memory()
+        gpu_memory, gpu_count, total_gpu_memory = await self._estimate_gpu_memory()
         
         # Оцениваем CPU
         try:
@@ -126,16 +129,23 @@ class ResourceAwareSelector:
         except:
             total_memory_gb = None
         
-        # Оцениваем capacity на основе ресурсов
-        capacity = self._estimate_capacity(resource_level, gpu_memory, cpu_cores)
+        # Оцениваем capacity на основе ресурсов (с учётом multi-GPU)
+        capacity = self._estimate_capacity(resource_level, gpu_memory, cpu_cores, gpu_count)
+        
+        # Определяем возможность запуска больших моделей
+        # 70B модель требует ~40GB VRAM, с 3x RTX 3090 (72GB) это возможно
+        can_run_large = total_gpu_memory is not None and total_gpu_memory >= 40
         
         self._resource_info = ResourceInfo(
             level=resource_level,
             available_models=available_models,
             gpu_memory_gb=gpu_memory,
+            gpu_count=gpu_count,
+            total_gpu_memory_gb=total_gpu_memory,
             cpu_cores=cpu_cores,
             total_memory_gb=total_memory_gb,
-            estimated_capacity=capacity
+            estimated_capacity=capacity,
+            can_run_large_models=can_run_large
         )
         
         self._last_resource_check = current_time
@@ -189,33 +199,55 @@ class ResourceAwareSelector:
         else:
             return ResourceLevel.MINIMAL
     
-    async def _estimate_gpu_memory(self) -> Optional[float]:
-        """Оценивает доступную GPU память"""
+    async def _estimate_gpu_memory(self) -> Tuple[Optional[float], int, Optional[float]]:
+        """
+        Оценивает доступную GPU память
+        
+        Returns:
+            Tuple[memory_per_gpu, gpu_count, total_memory]
+        """
         try:
             import subprocess
-            # Пробуем nvidia-smi
+            # Пробуем nvidia-smi для всех GPU
             result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                ["nvidia-smi", "--query-gpu=memory.total,name", "--format=csv,noheader,nounits"],
                 capture_output=True,
                 text=True,
                 timeout=5
             )
             if result.returncode == 0:
-                memory_mb = float(result.stdout.strip().split('\n')[0])
-                return memory_mb / 1024  # Конвертируем в GB
+                lines = result.stdout.strip().split('\n')
+                gpu_count = len(lines)
+                total_memory = 0.0
+                
+                for line in lines:
+                    parts = line.split(',')
+                    if parts:
+                        memory_mb = float(parts[0].strip())
+                        total_memory += memory_mb
+                
+                memory_per_gpu = total_memory / gpu_count / 1024  # В GB
+                total_memory_gb = total_memory / 1024
+                
+                logger.info(f"Detected {gpu_count} GPU(s) with {total_memory_gb:.1f} GB total VRAM")
+                
+                return memory_per_gpu, gpu_count, total_memory_gb
         except Exception as e:
             logger.debug(f"Failed to get GPU memory via nvidia-smi: {e}")
-            # Return None if we can't determine GPU memory
         
-        return None
+        return None, 0, None
     
     def _estimate_capacity(
         self,
         level: ResourceLevel,
         gpu_memory: Optional[float],
-        cpu_cores: int
+        cpu_cores: int,
+        gpu_count: int = 1
     ) -> int:
-        """Оценивает capacity (количество параллельных запросов)"""
+        """
+        Оценивает capacity (количество параллельных запросов)
+        с учётом multi-GPU конфигурации
+        """
         base_capacity = {
             ResourceLevel.MINIMAL: 1,
             ResourceLevel.LOW: 2,
@@ -226,22 +258,33 @@ class ResourceAwareSelector:
         
         capacity = base_capacity.get(level, 1)
         
-        # Корректируем на основе GPU памяти
+        # Корректируем на основе GPU памяти (на одну карту)
         if gpu_memory:
-            if gpu_memory >= 24:
+            if gpu_memory >= 24:  # RTX 3090, RTX 4090, A100
                 capacity = min(capacity * 2, 30)
-            elif gpu_memory >= 16:
+            elif gpu_memory >= 16:  # RTX 4080, A10
                 capacity = min(int(capacity * 1.5), 20)
             elif gpu_memory < 8:
                 capacity = max(1, capacity // 2)
         
-        # Корректируем на основе CPU
-        if cpu_cores >= 16:
-            capacity = min(capacity + 5, 30)
+        # MULTI-GPU: увеличиваем capacity пропорционально количеству GPU
+        if gpu_count > 1:
+            # Каждый дополнительный GPU добавляет ~80% capacity
+            # (не 100% из-за overhead на координацию)
+            gpu_multiplier = 1 + (gpu_count - 1) * 0.8
+            capacity = int(capacity * gpu_multiplier)
+            logger.info(f"Multi-GPU capacity boost: {gpu_count} GPUs -> {gpu_multiplier:.1f}x multiplier")
+        
+        # Корректируем на основе CPU (12900K = 24 threads)
+        if cpu_cores >= 24:
+            capacity = min(capacity + 10, 50)
+        elif cpu_cores >= 16:
+            capacity = min(capacity + 5, 40)
         elif cpu_cores < 4:
             capacity = max(1, capacity - 1)
         
-        return capacity
+        # Верхний предел для стабильности
+        return min(capacity, 50)
     
     async def select_adaptive_model(
         self,

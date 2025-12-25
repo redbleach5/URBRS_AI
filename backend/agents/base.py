@@ -610,6 +610,39 @@ class AgentRegistry:
         """List all available agents"""
         return list(self.agents.keys())
     
+    async def update_config(self, new_config: Any) -> None:
+        """
+        Update agent registry configuration dynamically.
+        
+        Args:
+            new_config: New AgentsConfig
+        """
+        logger.info("Updating Agent Registry configuration...")
+        self.config = new_config
+        
+        # Update individual agent configurations
+        agent_configs = {
+            "code_writer": getattr(new_config, "code_writer", None),
+            "react": getattr(new_config, "react", None),
+            "research": getattr(new_config, "research", None),
+            "data_analysis": getattr(new_config, "data_analysis", None),
+            "workflow": getattr(new_config, "workflow", None),
+            "integration": getattr(new_config, "integration", None),
+            "monitoring": getattr(new_config, "monitoring", None),
+        }
+        
+        for agent_name, agent_config in agent_configs.items():
+            if agent_config and agent_name in self.agents:
+                agent = self.agents[agent_name]
+                # Update configurable parameters
+                config_dict = pydantic_to_dict(agent_config)
+                agent.temperature = config_dict.get("temperature", agent.temperature)
+                agent.max_iterations = config_dict.get("max_iterations", agent.max_iterations)
+                agent.use_thinking_mode = config_dict.get("use_thinking_mode", agent.use_thinking_mode)
+                logger.debug(f"Updated config for agent: {agent_name}")
+        
+        logger.info("Agent Registry configuration updated")
+    
     async def shutdown(self) -> None:
         """Shutdown all agents and communicator"""
         # Shutdown communicator first

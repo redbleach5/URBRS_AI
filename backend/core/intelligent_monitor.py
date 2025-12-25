@@ -291,31 +291,34 @@ class IntelligentMonitor:
             variance = sum((x - mean) ** 2 for x in recent_values) / len(recent_values)
             std_dev = variance ** 0.5
             
-            # Настройки порогов для разных типов метрик
-            # Для CPU и памяти используем более строгие пороги (5% минимальное отклонение)
-            # Для других метрик используем стандартные пороги
+            # Threshold settings for different metric types
+            # For system metrics (CPU, memory), use much more relaxed thresholds
+            # to avoid excessive warning logs during normal operation
             if metric_name in ["cpu_percent", "memory_percent", "memory_mb"]:
-                # Минимальное отклонение для системных метрик (повышаем чувствительность для памяти)
-                min_deviation = max(mean * 0.20, 2.0) if metric_name.startswith("memory") else mean * 0.05
-                # Используем более мягкий порог: 3*std_dev и обязательное минимальное отклонение
-                threshold = mean + max(3 * std_dev, min_deviation)
+                # For memory metrics: require at least 50% deviation from mean
+                # This prevents warnings during normal memory fluctuations
+                if metric_name.startswith("memory"):
+                    min_deviation = max(mean * 0.50, 50.0)  # At least 50% or 50MB
+                else:
+                    min_deviation = max(mean * 0.30, 5.0)  # At least 30% or 5% CPU
+                # Use 4*std_dev for more relaxed threshold
+                threshold = mean + max(4 * std_dev, min_deviation)
             else:
-                # Для других метрик: минимальное отклонение 10% от среднего
-                min_deviation = mean * 0.10 if mean > 0 else 2 * std_dev
-                threshold = mean + max(2 * std_dev, min_deviation)
+                # For other metrics: 20% minimum deviation
+                min_deviation = mean * 0.20 if mean > 0 else 3 * std_dev
+                threshold = mean + max(3 * std_dev, min_deviation)
             
-            # Обнаруживаем аномалии только если отклонение значительное
+            # Detect anomalies only if deviation is significant
             anomalies = [v for v in recent_values if v > threshold]
             
-            # Дополнительная проверка: не логируем аномалии, если они незначительны
-            # (например, для CPU 0.1% -> 0.2% это не критично)
-            if metric_name == "cpu_percent" and mean < 1.0:
-                # Для низкой загрузки CPU игнорируем небольшие отклонения
-                anomalies = [v for v in anomalies if v > mean + 0.5]  # Минимум 0.5% отклонение
+            # Additional filter: don't log insignificant anomalies
+            if metric_name == "cpu_percent":
+                # For CPU, require at least 5% absolute deviation
+                anomalies = [v for v in anomalies if v > mean + 5.0]
             
-            if metric_name in ["memory_percent", "memory_mb"] and mean < 10:
-                # Для низкого использования памяти требуем минимум 1% отклонение
-                min_absolute_deviation = mean * 0.10  # 10% от среднего
+            if metric_name in ["memory_percent", "memory_mb"]:
+                # For memory, require at least 25% relative deviation
+                min_absolute_deviation = mean * 0.25
                 anomalies = [v for v in anomalies if (v - mean) > min_absolute_deviation]
             
             if anomalies:

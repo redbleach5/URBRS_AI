@@ -30,7 +30,7 @@ class LLMProviderConfig(BaseModel):
     """Configuration for a single LLM provider"""
     enabled: bool = True
     api_key: Optional[str] = None
-    default_model: str = "gpt-4"
+    default_model: Optional[str] = None  # None means auto-detect for Ollama
     base_url: Optional[str] = None
     timeout: int = 60
     max_retries: int = 3
@@ -257,15 +257,15 @@ def get_adaptive_defaults() -> Dict[str, Any]:
                 "ollama": {
                     "enabled": True,
                     "base_url": "http://localhost:11434",
-                    "default_model": "llama2",
+                    "default_model": None,  # Auto-detect: will use first available model
                     "timeout": 300,
                     "max_retries": 2,
                     "cache_enabled": True,
                     "auto_detect_models": True,
                     "recommended_models": {
-                        "code": ["codellama", "deepseek-coder", "mistral"],
-                        "chat": ["llama2", "mistral", "neural-chat"],
-                        "analysis": ["llama2", "mistral"],
+                        "code": ["codellama", "deepseek-coder", "qwen2.5-coder", "mistral"],
+                        "chat": ["gemma3", "llama3.2", "mistral", "qwen2.5"],
+                        "analysis": ["gemma3", "llama3.2", "mistral", "qwen2.5"],
                     },
                 },
             },
@@ -433,7 +433,7 @@ def get_adaptive_defaults() -> Dict[str, Any]:
             "audio": {
                 "enabled": True,
                 "transcription": True,
-                "model": "whisper-base",
+                "model": "base",  # Correct Whisper model name (not 'whisper-base')
             },
             "video": {
                 "enabled": True,

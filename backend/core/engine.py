@@ -303,7 +303,7 @@ class IDAEngine:
             if hasattr(new_config, 'logging') and new_config.logging:
                 self.config.logging = new_config.logging
                 # Динамически применяем настройки логирования
-                from ..core.pydantic_utils import pydantic_to_dict
+                # pydantic_to_dict уже импортирован на уровне модуля
                 from ..core.logger import configure_logging
                 logging_config = pydantic_to_dict(new_config.logging)
                 configure_logging(logging_config)

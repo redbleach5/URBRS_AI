@@ -33,7 +33,8 @@ class AdvancedCache:
         memory_size: int = 1000,
         disk_cache_dir: str = "cache",
         redis_url: Optional[str] = None,
-        ttl: int = 3600  # Time to live в секундах
+        ttl: int = 3600,  # Time to live в секундах
+        max_disk_size_mb: int = 500  # Maximum disk cache size in MB
     ):
         # Используем OrderedDict для LRU кэша
         self.memory_cache: LRUDict[str, Dict[str, Any]] = LRUDict()
@@ -41,6 +42,8 @@ class AdvancedCache:
         self.disk_cache_dir = Path(disk_cache_dir)
         self.disk_cache_dir.mkdir(parents=True, exist_ok=True)
         self.ttl = ttl
+        self.max_disk_size_mb = max_disk_size_mb
+        self._last_disk_cleanup = time.time()
         
         # Redis для distributed caching
         self.redis_client = None
@@ -133,6 +136,9 @@ class AdvancedCache:
         
         # 3. Disk cache (async, не блокирует основной поток)
         try:
+            # Periodically cleanup disk cache to stay within limits
+            self._maybe_cleanup_disk_cache()
+            
             cache_file = self.disk_cache_dir / f"{key}.json"
             with open(cache_file, 'w') as f:
                 json.dump(entry, f)
@@ -204,12 +210,80 @@ class AdvancedCache:
         for cache_file in self.disk_cache_dir.glob("*.json"):
             cache_file.unlink()
     
+    def _get_disk_cache_size_mb(self) -> float:
+        """Returns current disk cache size in MB"""
+        total_size = 0
+        try:
+            for cache_file in self.disk_cache_dir.glob("*.json"):
+                total_size += cache_file.stat().st_size
+        except Exception as e:
+            logger.debug(f"Error calculating disk cache size: {e}")
+        return total_size / (1024 * 1024)
+    
+    def _cleanup_disk_cache(self, target_size_mb: Optional[float] = None):
+        """
+        Clean up disk cache to stay within size limits.
+        Removes oldest files first (LRU-like behavior).
+        
+        Args:
+            target_size_mb: Target size to reduce to. If None, uses max_disk_size_mb * 0.8
+        """
+        try:
+            target = target_size_mb or (self.max_disk_size_mb * 0.8)
+            current_size = self._get_disk_cache_size_mb()
+            
+            if current_size <= target:
+                return
+            
+            logger.info(f"Disk cache cleanup: {current_size:.1f}MB -> {target:.1f}MB")
+            
+            # Get all cache files with modification time
+            cache_files = []
+            for cache_file in self.disk_cache_dir.glob("*.json"):
+                try:
+                    stat = cache_file.stat()
+                    cache_files.append((cache_file, stat.st_mtime, stat.st_size))
+                except Exception:
+                    continue
+            
+            # Sort by modification time (oldest first)
+            cache_files.sort(key=lambda x: x[1])
+            
+            # Remove files until we reach target size
+            removed_count = 0
+            for cache_file, mtime, size in cache_files:
+                if current_size <= target:
+                    break
+                try:
+                    cache_file.unlink()
+                    current_size -= size / (1024 * 1024)
+                    removed_count += 1
+                except Exception as e:
+                    logger.debug(f"Failed to remove cache file {cache_file}: {e}")
+            
+            if removed_count > 0:
+                logger.info(f"Disk cache cleanup: removed {removed_count} files")
+                
+        except Exception as e:
+            logger.warning(f"Disk cache cleanup error: {e}")
+    
+    def _maybe_cleanup_disk_cache(self):
+        """Periodically check and cleanup disk cache (every 5 minutes)"""
+        now = time.time()
+        if now - self._last_disk_cleanup > 300:  # 5 minutes
+            self._last_disk_cleanup = now
+            if self._get_disk_cache_size_mb() > self.max_disk_size_mb:
+                self._cleanup_disk_cache()
+    
     def get_stats(self) -> Dict[str, Any]:
         """Возвращает статистику кэша"""
+        disk_size_mb = self._get_disk_cache_size_mb()
         return {
             "memory_entries": len(self.memory_cache),
             "memory_size_limit": self.memory_size,
             "disk_entries": len(list(self.disk_cache_dir.glob("*.json"))),
+            "disk_size_mb": round(disk_size_mb, 2),
+            "disk_size_limit_mb": self.max_disk_size_mb,
             "redis_available": self.redis_client is not None
         }
 

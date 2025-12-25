@@ -88,22 +88,24 @@ class Orchestrator:
         
         logger.info(f"Orchestrator executing task: {task}")
 
-        # Fast path: if this is clearly a code generation request (e.g., "напиши программу", "сгенерируй игру"),
-        # skip TaskRouter simple_chat handling and route directly to code_writer so we always return code, not chat text.
-        code_gen_markers = [
-            "сгенерируй", "напиши", "создай", "создать", "написать",
-            "generate", "create", "write", "build", "implement",
-            "игра", "game", "приложение", "app", "application", "код", "code", "script"
-        ]
-        is_code_gen = any(marker in task.lower() for marker in code_gen_markers)
-        if is_code_gen and not agent_type:
-            agent_type = "code_writer"
-            logger.info("Detected code generation intent, forcing agent_type=code_writer and skipping TaskRouter.")
+        # НЕ форсируем code_writer здесь - пусть LLMClassifier решает
+        # Это позволяет системе быть умнее и различать:
+        # - "напиши код игры" -> code_writer
+        # - "напиши отчёт о проекте" -> research  
+        # - "напиши что делает этот код" -> research
+        is_code_gen = False  # Отключаем жёсткую логику, доверяем LLMClassifier
         
         # Use TaskRouter for intelligent routing if available and agent not pre-selected
+        # Cache routing result to avoid double calls
+        routing = None
+        task_type_from_routing = None
+        complexity_from_routing = None
+        
         if self.task_router and not agent_type:
             try:
                 routing = await self.task_router.route_task(task, context)
+                task_type_from_routing = routing.task_type
+                complexity_from_routing = routing.complexity
                 logger.info(f"Task routed: type={routing.task_type}, complexity={routing.complexity}")
                 
                 # For simple tasks, process directly through TaskRouter
@@ -119,22 +121,10 @@ class Orchestrator:
             except Exception as e:
                 logger.warning(f"TaskRouter failed: {e}, falling back to standard execution")
         
-        # Адаптивный выбор модели с учетом ресурсов
+        # Adaptive model selection using cached routing result
         adaptive_selection = None
-        task_type_from_routing = None
-        complexity_from_routing = None
         if self.resource_aware_selector:
             try:
-                # Используем routing если доступен и agent_type не предустановлен
-                if self.task_router and not agent_type:
-                    try:
-                        routing = await self.task_router.route_task(task, context)
-                        task_type_from_routing = routing.task_type
-                        complexity_from_routing = routing.complexity
-                    except Exception as e:
-                        logger.debug(f"Failed to route task, using defaults: {e}")
-                        # Continue with default values
-                
                 adaptive_selection = await self.resource_aware_selector.select_adaptive_model(
                     task=task,
                     task_type=task_type_from_routing,
@@ -159,36 +149,18 @@ class Orchestrator:
             else:
                 similar_solutions = await self.memory.search_similar_tasks(task)
         
-        # Check if this is a direct code generation task - if so, execute directly
-        code_generation_keywords = ["сгенерировать", "generate", "создать", "create", "написать", "write", "игра", "game", "приложение", "app", "application"]
-        is_direct_code_task = any(keyword in task.lower() for keyword in code_generation_keywords) and (
-            "игра" in task.lower() or "game" in task.lower() or 
-            "приложение" in task.lower() or "app" in task.lower() or
-            "application" in task.lower() or
-            "код" in task.lower() or "code" in task.lower()
-        )
-        
-        # Check if this is an information/research task - execute directly through ResearchAgent
-        research_keywords = [
-            "найди", "найти", "find", "search", "последние", "latest", "новости", "news",
-            "информация", "information", "версии", "versions", "релиз", "release",
-            "актуальные", "current", "современные", "modern", "что такое", "what is"
-        ]
-        is_research_task = any(keyword in task.lower() for keyword in research_keywords) and not agent_type
+        # Теперь НЕ форсируем агента на основе ключевых слов
+        # Вся логика классификации делегирована LLMClassifier в _select_agent()
+        # Это делает систему умнее - она понимает контекст, а не просто ищет слова
         
         # Always use LLM for intelligent task understanding and planning (like Manus AI)
         planning_config = pydantic_to_dict(self.config.planning)
         strategy = planning_config.get("strategy", "llm")
         
-        # For direct code generation tasks, research tasks, or if agent_type is already set, skip decomposition and execute directly
-        if agent_type or is_direct_code_task or is_research_task:
-            if agent_type:
-                logger.info(f"Agent type already set to {agent_type}, skipping task decomposition")
-            elif is_research_task:
-                logger.info(f"Detected research/information task, executing directly through ResearchAgent: {task[:50]}")
-                agent_type = "research"  # Set agent type to research for information tasks
-            else:
-                logger.info(f"Detected direct code generation task, executing directly: {task[:50]}")
+        # Если agent_type уже задан явно - используем его
+        # Иначе пусть LLMClassifier решает в _select_agent()
+        if agent_type:
+            logger.info(f"Agent type explicitly set to {agent_type}, using it directly")
             subtasks = [task]
         elif strategy == "llm" or strategy == "hybrid" or self.llm_manager:
             subtasks = await self._decompose_task_llm(task, context)
@@ -788,6 +760,56 @@ Respond with ONLY the agent name (e.g., "code_writer", "research", etc.), no exp
             "success": all(r.get("success", False) for r in results),
             "context_accumulated": not execute_parallel
         }
+    
+    def _is_code_generation_task(self, task: str) -> bool:
+        """
+        Unified detection of code generation tasks.
+        
+        Args:
+            task: Task description
+            
+        Returns:
+            True if task is a code generation request
+        """
+        task_lower = task.lower()
+        
+        # Keywords indicating code generation intent
+        code_gen_markers = [
+            "сгенерируй", "напиши", "создай", "создать", "написать", "реализуй",
+            "generate", "create", "write", "build", "implement", "develop", "code"
+        ]
+        
+        # Target keywords indicating what to generate
+        target_markers = [
+            "игра", "game", "приложение", "app", "application",
+            "код", "code", "script", "скрипт", "программа", "program",
+            "функци", "function", "класс", "class", "модуль", "module",
+            "бот", "bot", "сервис", "service", "api", "сайт", "site", "web"
+        ]
+        
+        has_gen_intent = any(marker in task_lower for marker in code_gen_markers)
+        has_target = any(marker in task_lower for marker in target_markers)
+        
+        return has_gen_intent and has_target
+    
+    async def update_config(self, new_config: OrchestratorConfig) -> None:
+        """
+        Update orchestrator configuration dynamically.
+        
+        Args:
+            new_config: New OrchestratorConfig
+        """
+        logger.info("Updating Orchestrator configuration...")
+        
+        self.config = new_config
+        self.max_parallel_tasks = new_config.max_parallel_tasks
+        self.task_timeout = new_config.task_timeout
+        self.auto_recovery = new_config.auto_recovery
+        
+        logger.info(
+            f"Orchestrator updated: max_parallel_tasks={self.max_parallel_tasks}, "
+            f"task_timeout={self.task_timeout}, auto_recovery={self.auto_recovery}"
+        )
     
     async def shutdown(self) -> None:
         """Shutdown orchestrator"""

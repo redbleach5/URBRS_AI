@@ -139,6 +139,26 @@ class ToolRegistry:
             for name, tool in self.tools.items()
         }
     
+    async def update_config(self, new_config: Any) -> None:
+        """
+        Update tool registry configuration dynamically.
+        
+        Args:
+            new_config: New ToolsConfig or dict configuration
+        """
+        logger.info("Updating Tool Registry configuration...")
+        self.config = new_config
+        
+        # Update safety settings if provided
+        if hasattr(new_config, "safety") and new_config.safety:
+            from ..core.pydantic_utils import pydantic_to_dict
+            from ..safety.guard import SafetyGuard
+            safety_config = pydantic_to_dict(new_config.safety)
+            self.safety_guard = SafetyGuard(safety_config)
+            logger.info("Safety Guard reconfigured")
+        
+        logger.info("Tool Registry configuration updated")
+    
     async def shutdown(self) -> None:
         """Shutdown tool registry"""
         self.tools.clear()

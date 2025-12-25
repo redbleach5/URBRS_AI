@@ -48,6 +48,9 @@ opencv-python>=4.10.0
 pytesseract>=0.3.13
 openai-whisper>=20231117
 
+# Web Search
+duckduckgo-search>=7.0.0  # Reliable DuckDuckGo search library
+
 # Utilities
 python-jose[cryptography]>=3.3.0
 passlib[bcrypt]>=1.7.4

@@ -524,69 +524,9 @@ export default function SettingsPanel() {
             </p>
           </section>
 
-        <section className="space-y-2">
-          <div>
-            <h3 className="text-lg font-semibold">API Сервер</h3>
-            {availabilityStatus?.server_available ? (
-              <div className="bg-yellow-900/20 border border-yellow-700/50 rounded p-2 mt-1 mb-2">
-                <p className="text-xs text-yellow-200">
-                  ⚠️ Эти настройки (host, port, workers, reload) требуют перезапуска сервера для применения. Остальные настройки применяются автоматически без перезапуска.
-                </p>
-              </div>
-            ) : (
-              <div className="bg-red-900/20 border border-red-700/50 rounded p-2 mt-1 mb-2">
-                <p className="text-xs text-red-200">
-                  ⚠️ Сервер недоступен. Все настройки будут сохранены в файл, но применятся только после запуска сервера. Настройки API сервера (host, port, workers, reload) вступят в силу при следующем запуске.
-                </p>
-              </div>
-            )}
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="text-sm text-gray-300">
-                Host (IP адрес)
-                <span className="text-xs text-gray-500 ml-1">0.0.0.0 = все интерфейсы</span>
-              </label>
-              <input
-                value={get(localConfig, 'api.host', '') || '0.0.0.0'}
-                onChange={(e) => updateField('api.host', e.target.value)}
-                className="w-full bg-[#0f111b] border-2 border-[#1f2236] rounded-xl px-4 py-2.5 text-sm text-gray-200 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all duration-200"
-                placeholder="0.0.0.0"
-              />
-            </div>
-            <div>
-              <label className="text-sm text-gray-300">Port (Порт сервера)</label>
-              <input
-                type="number"
-                value={get(localConfig, 'api.port', undefined) ?? 8000}
-                onChange={(e) => updateField('api.port', Number(e.target.value))}
-                className="w-full bg-[#0f111b] border-2 border-[#1f2236] rounded-xl px-4 py-2.5 text-sm text-gray-200 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all duration-200"
-                placeholder="8000"
-              />
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <label className="inline-flex items-center gap-2 text-sm text-gray-300">
-              <input
-                type="checkbox"
-                checked={Boolean(get(localConfig, 'api.reload', false))}
-                onChange={(e) => updateField('api.reload', e.target.checked)}
-                className="w-4 h-4 rounded border-[#2a2f46] bg-[#0f111b] text-blue-600 focus:ring-2 focus:ring-blue-500/20"
-              />
-              <span>Автоперезагрузка (reload)</span>
-            </label>
-            <label className="inline-flex items-center gap-2 text-sm ml-4 text-gray-300">
-              <span className="text-gray-400">Workers:</span>
-              <input
-                type="number"
-                min="1"
-                value={get(localConfig, 'api.workers', 1)}
-                onChange={(e) => updateField('api.workers', Number(e.target.value))}
-                className="w-20 bg-[#0f111b] border-2 border-[#1f2236] rounded-xl px-3 py-1.5 text-sm text-gray-200 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all duration-200"
-              />
-            </label>
-          </div>
-        </section>
+        {/* Секция API Сервера удалена - эти настройки (host, port, workers, reload) 
+            не имеет смысла менять через UI, т.к. они применяются только при запуске сервера.
+            Для изменения этих настроек редактируйте backend/config/config.yaml напрямую */}
 
         <section className="space-y-3">
           <div>
@@ -606,7 +546,12 @@ export default function SettingsPanel() {
                   </h4>
                 <span className="text-xs px-2.5 py-1 bg-green-900/40 border border-green-500/30 text-green-300 rounded-lg font-medium">Приоритетный</span>
               </div>
-              <div className="space-y-4">
+                <div className="space-y-4">
+                <div className="bg-purple-900/20 border border-purple-700/50 rounded-xl p-3 mb-2">
+                  <p className="text-xs text-purple-200">
+                    🦙 <strong>Это адрес вашего Ollama сервера</strong> — куда AILLM будет отправлять запросы к LLM моделям. Ollama должен быть запущен по этому адресу.
+                  </p>
+                </div>
                 <div>
                   <label className="text-xs text-gray-300 mb-2 block font-medium">Base URL (адрес сервера Ollama)</label>
                   <input
@@ -616,7 +561,7 @@ export default function SettingsPanel() {
                     placeholder="http://localhost:11434"
                   />
                   <p className="text-xs text-gray-400 mt-2">
-                    Адрес, на котором запущен Ollama сервер
+                    Пример: <code className="bg-[#0f111b] px-1 rounded">http://localhost:11434</code> (локально) или <code className="bg-[#0f111b] px-1 rounded">http://192.168.1.100:11434</code> (удалённый сервер)
                   </p>
                 </div>
                 <div>

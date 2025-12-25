@@ -244,11 +244,13 @@ export function CodeEditor() {
 
 
     try {
+      // Не указываем agent_type - пусть бэкенд сам определит через LLMClassifier
       const response = await executeTask({
         task,
-        agent_type: 'code_writer',
+        // agent_type НЕ передаём - оркестратор сам выберет через умную классификацию
         context: {
-          existing_code: code
+          existing_code: code,
+          mode: 'code_editor'  // Подсказка что мы в редакторе кода
         }
       });
 
@@ -275,6 +277,7 @@ export function CodeEditor() {
     setRunLoading(true);
     setRunResult(null);
 
+    const detectedType = detectCodeType(code);
 
     try {
       // Special handling for HTML/CSS: create preview and open in browser

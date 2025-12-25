@@ -7,6 +7,9 @@ from typing import Dict, Any
 from pathlib import Path
 import yaml
 
+from ...core.logger import get_logger
+logger = get_logger(__name__)
+
 router = APIRouter()
 
 
@@ -229,7 +232,6 @@ async def update_config(config_update: Dict[str, Any], request: Request):
             with config_path.open("w", encoding="utf-8") as f:
                 yaml.safe_dump(config_to_save, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
         except Exception as e:
-            from loguru import logger
             logger.error(f"Ошибка записи конфигурации в {config_path}: {e}")
             raise HTTPException(status_code=500, detail=f"Ошибка записи конфигурации: {str(e)}")
 

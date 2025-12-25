@@ -538,6 +538,27 @@ class LongTermMemory:
         
         return stats
     
+    async def update_config(self, new_config: MemoryConfig) -> None:
+        """
+        Update memory configuration dynamically.
+        
+        Args:
+            new_config: New MemoryConfig
+        """
+        logger.info("Updating Long Term Memory configuration...")
+        
+        # Update configurable parameters that don't require restart
+        if hasattr(new_config, 'max_memories'):
+            self.max_memories = new_config.max_memories
+        if hasattr(new_config, 'similarity_threshold'):
+            self.similarity_threshold = new_config.similarity_threshold
+        
+        self.config = new_config
+        logger.info(
+            f"Long Term Memory updated: max_memories={self.max_memories}, "
+            f"similarity_threshold={self.similarity_threshold}"
+        )
+    
     async def shutdown(self) -> None:
         """Shutdown memory system"""
         if self.db:
