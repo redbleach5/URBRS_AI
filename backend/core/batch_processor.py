@@ -17,7 +17,9 @@ class BatchProcessor:
         self,
         max_concurrent: int = 10,
         model_selector: Optional[Any] = None,
-        resource_aware: bool = True
+        resource_aware: bool = True,
+        resource_selector: Optional[Any] = None,
+        config: Optional[Dict[str, Any]] = None
     ):
         """
         Initialize batch processor
@@ -26,12 +28,15 @@ class BatchProcessor:
             max_concurrent: Maximum concurrent tasks (base value)
             model_selector: SmartModelSelector для оптимизации выбора моделей
             resource_aware: Auto-scale based on available resources
+            resource_selector: Внешний ResourceAwareSelector (предпочтительно)
+            config: Конфигурация для создания ResourceAwareSelector
         """
         self.base_max_concurrent = max_concurrent
         self.max_concurrent = max_concurrent
         self.model_selector = model_selector
         self.resource_aware = resource_aware
-        self._resource_selector = None
+        self._resource_selector = resource_selector
+        self._config = config or {}
     
     async def _auto_scale_concurrent(self) -> int:
         """
@@ -42,10 +47,10 @@ class BatchProcessor:
             return self.base_max_concurrent
         
         try:
-            # Ленивая инициализация ResourceAwareSelector
+            # Ленивая инициализация ResourceAwareSelector с конфигом
             if self._resource_selector is None:
                 from .resource_aware_selector import ResourceAwareSelector
-                self._resource_selector = ResourceAwareSelector()
+                self._resource_selector = ResourceAwareSelector(config=self._config)
             
             resources = await self._resource_selector.discover_resources()
             

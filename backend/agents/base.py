@@ -72,6 +72,9 @@ class BaseAgent(ABC, ReflectionMixin):
         
         self._initialized = False
         
+        # Текущий контекст выполнения (для distributed routing)
+        self._current_execution_context: Dict[str, Any] = {}
+        
         # Communication
         self._communicator: Optional["AgentCommunicator"] = None
         
@@ -105,7 +108,7 @@ class BaseAgent(ABC, ReflectionMixin):
         
         Args:
             task: Task description
-            context: Additional context
+            context: Additional context (может содержать preferred_model и ollama_server_url для distributed routing)
             
         Returns:
             Result dictionary with optional reflection data
@@ -115,6 +118,9 @@ class BaseAgent(ABC, ReflectionMixin):
         
         start_time = time.time()
         ctx = context or {}
+        
+        # Сохраняем контекст для distributed routing (чтобы _get_llm_response мог использовать)
+        self._current_execution_context = ctx
         
         try:
             structured_logger.log_agent_action(
@@ -167,6 +173,9 @@ class BaseAgent(ABC, ReflectionMixin):
                 duration=duration
             )
             raise
+        finally:
+            # Очищаем контекст выполнения чтобы не влиять на следующие вызовы
+            self._current_execution_context = {}
     
     @abstractmethod
     async def _execute_impl(self, task: str, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -394,14 +403,49 @@ class BaseAgent(ABC, ReflectionMixin):
         if task_type:
             kwargs["task_type"] = task_type
         
-        response = await self.llm_manager.generate(
-            messages=enhanced_messages,
-            provider_name=provider,
-            model=self.default_model,
-            temperature=self.temperature,
-            thinking_mode=thinking_mode,
-            **kwargs
+        # Поддержка distributed routing: используем модель/сервер из контекста или kwargs
+        # Приоритет: kwargs > _current_execution_context > default_model
+        model_to_use = (
+            kwargs.pop("preferred_model", None) or 
+            self._current_execution_context.get("preferred_model") or 
+            self.default_model
         )
+        ollama_server_url = (
+            kwargs.pop("ollama_server_url", None) or 
+            self._current_execution_context.get("ollama_server_url")
+        )
+        
+        # Если указан другой сервер Ollama, временно переключаемся
+        original_base_url = None
+        ollama_provider = self.llm_manager.providers.get("ollama") if self.llm_manager else None
+        if ollama_server_url and ollama_provider and provider == "ollama":
+            original_base_url = ollama_provider.base_url
+            ollama_provider.base_url = ollama_server_url
+            import httpx
+            ollama_provider.client = httpx.AsyncClient(
+                base_url=ollama_server_url,
+                timeout=ollama_provider.timeout
+            )
+            logger.debug(f"Agent {self.name} switched to Ollama server: {ollama_server_url}")
+        
+        try:
+            response = await self.llm_manager.generate(
+                messages=enhanced_messages,
+                provider_name=provider,
+                model=model_to_use,
+                temperature=self.temperature,
+                thinking_mode=thinking_mode,
+                **kwargs
+            )
+        finally:
+            # Восстанавливаем оригинальный сервер если переключались
+            if original_base_url and ollama_provider:
+                ollama_provider.base_url = original_base_url
+                import httpx
+                ollama_provider.client = httpx.AsyncClient(
+                    base_url=original_base_url,
+                    timeout=ollama_provider.timeout
+                )
         
         # Log thinking trace if available
         if response.has_thinking and response.thinking:

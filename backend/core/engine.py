@@ -25,6 +25,7 @@ from .batch_processor import BatchProcessor
 from .intelligent_monitor import get_monitor, initialize_monitor, IssueSeverity
 from .pydantic_utils import pydantic_to_dict
 from .learning_system import get_learning_system, initialize_learning_system
+from .resource_aware_selector import ResourceAwareSelector
 
 
 class IDAEngine:
@@ -56,6 +57,10 @@ class IDAEngine:
         self.memory: Optional[LongTermMemory] = None
         self.batch_processor: Optional[BatchProcessor] = None
         self.learning_system = None  # Will be initialized in initialize()
+        self.resource_aware_selector: Optional[ResourceAwareSelector] = None
+        
+        # Сохраняем raw config для передачи в компоненты
+        self.raw_config: Dict[str, Any] = {}
         
         # Initialize intelligent monitor
         # Всегда используем корневую директорию LOGS_DEBUG
@@ -126,6 +131,16 @@ class IDAEngine:
                 )
                 await self.tool_registry.initialize()
             
+            # Сохраняем raw config для передачи в компоненты (distributed routing и др.)
+            self.raw_config = pydantic_to_dict(self.config) if self.config else {}
+            
+            # Initialize Resource Aware Selector (для распределённой маршрутизации моделей)
+            logger.info("Initializing Resource Aware Selector...")
+            self.resource_aware_selector = ResourceAwareSelector(
+                llm_manager=self.llm_manager,
+                config=self.raw_config
+            )
+            
             # Initialize Batch Processor
             logger.info("Initializing Batch Processor...")
             self.batch_processor = BatchProcessor(max_concurrent=5)
@@ -160,7 +175,8 @@ class IDAEngine:
                     self.config.orchestrator,
                     self.agent_registry,
                     self.llm_manager,
-                    self.memory
+                    self.memory,
+                    full_config=self.raw_config  # Передаём полный конфиг для distributed_mode
                 )
                 await self.orchestrator.initialize()
             
@@ -243,7 +259,9 @@ class IDAEngine:
                     self.orchestrator.llm_classifier = LLMClassifier(self.llm_manager) if self.llm_manager else None
                     self.orchestrator.task_router = TaskRouter(self.llm_manager, config_dict) if self.llm_manager else None
                     self.orchestrator.model_selector = SmartModelSelector(self.llm_manager, config_dict) if self.llm_manager else None
-                    self.orchestrator.resource_aware_selector = ResourceAwareSelector(self.llm_manager, config_dict) if self.llm_manager else None
+                    # ResourceAwareSelector нужен полный конфиг для distributed_mode
+                    self.orchestrator.resource_aware_selector = ResourceAwareSelector(self.llm_manager, self.raw_config) if self.llm_manager else None
+                    self.orchestrator.full_config = self.raw_config
                 
                 # Обновляем ссылки в агентах
                 if self.agent_registry and hasattr(self.agent_registry, 'agents'):

@@ -33,7 +33,8 @@ class Orchestrator:
         config: OrchestratorConfig,
         agent_registry: AgentRegistry,
         llm_manager: LLMProviderManager,
-        memory: Optional[LongTermMemory] = None
+        memory: Optional[LongTermMemory] = None,
+        full_config: Optional[Dict[str, Any]] = None
     ):
         """
         Initialize orchestrator
@@ -43,11 +44,13 @@ class Orchestrator:
             agent_registry: Agent registry
             llm_manager: LLM provider manager
             memory: Long term memory
+            full_config: Полный конфиг приложения (для distributed_mode и др.)
         """
         self.config = config
         self.agent_registry = agent_registry
         self.llm_manager = llm_manager
         self.memory = memory
+        self.full_config = full_config or {}
         self.max_parallel_tasks = config.max_parallel_tasks
         self.task_timeout = config.task_timeout
         self.auto_recovery = config.auto_recovery
@@ -57,7 +60,8 @@ class Orchestrator:
         config_dict = pydantic_to_dict(config)
         self.task_router = TaskRouter(llm_manager, config_dict) if llm_manager else None
         self.model_selector = SmartModelSelector(llm_manager, config_dict) if llm_manager else None
-        self.resource_aware_selector = ResourceAwareSelector(llm_manager, config_dict) if llm_manager else None
+        # ResourceAwareSelector нужен полный конфиг для distributed_mode
+        self.resource_aware_selector = ResourceAwareSelector(llm_manager, self.full_config) if llm_manager else None
         self.prompt_optimizer = PromptOptimizer()
         self.time_estimator = TimeEstimator()
     
@@ -134,7 +138,16 @@ class Orchestrator:
                     f"Adaptive selection: {adaptive_selection.model} "
                     f"(resource: {adaptive_selection.resource_level.value}, "
                     f"quality: {adaptive_selection.quality_estimate:.2f})"
+                    + (f", server: {adaptive_selection.server_name}" if adaptive_selection.server_url else "")
                 )
+                
+                # Передаём выбранную модель и сервер в контекст для агентов
+                context = context or {}
+                context["preferred_model"] = adaptive_selection.model
+                context["preferred_provider"] = adaptive_selection.provider
+                if adaptive_selection.server_url:
+                    context["ollama_server_url"] = adaptive_selection.server_url
+                    context["distributed_routing"] = True
             except Exception as e:
                 logger.warning(f"Adaptive selection failed: {e}")
         
