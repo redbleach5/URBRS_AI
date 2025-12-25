@@ -53,11 +53,18 @@ async def execute_task(request: Request, task_request: Dict[str, Any]):
             }
         )
         
+        # Добавляем модель в контекст если указана
+        context = validated.context or {}
+        if task_request.get("model"):
+            context["preferred_model"] = task_request["model"]
+        if task_request.get("provider"):
+            context["preferred_provider"] = task_request["provider"]
+        
         # Execute task - система автоматически определит сложность и выберет подход
         result = await engine.execute_task(
             task=validated.task,
             agent_type=validated.agent_type,
-            context=validated.context or {}
+            context=context
         )
         
         logger.debug(

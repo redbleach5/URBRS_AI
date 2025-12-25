@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import Editor from '@monaco-editor/react';
-import { executeTask, executeTool } from '../api/client';
+import { executeTask, executeTool, sendChat, getAvailableModels, selectModel, ModelInfo } from '../api/client';
 import {
   Folder, FolderOpen, File, FileCode, FileJson, FileText, FileCog,
   Code, Code2, Terminal, Database, Globe, Lock,
@@ -147,8 +147,16 @@ export function IDE() {
   const [generating, setGenerating] = useState(false);
   const [running, setRunning] = useState(false);
   const [runResult, setRunResult] = useState<string | null>(null);
-  const [language, setLanguage] = useState<'python' | 'javascript' | 'typescript' | 'html'>('python');
   const [htmlPreviewUrl, setHtmlPreviewUrl] = useState<string | null>(null);
+  const [detectedStack, setDetectedStack] = useState<string | null>(null);
+  
+  // Model selection state
+  const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [autoSelectModel, setAutoSelectModel] = useState(true);
+  const [showModelSelector, setShowModelSelector] = useState(false);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [resourceLevel, setResourceLevel] = useState<string>('unknown');
   
   // AI Analysis state
   const [analyzing, setAnalyzing] = useState(false);
@@ -181,6 +189,44 @@ export function IDE() {
   // Load recent projects on mount
   useEffect(() => {
     setRecentProjects(getRecentProjects());
+  }, []);
+
+  // Load available models on mount
+  useEffect(() => {
+    const loadModels = async () => {
+      setLoadingModels(true);
+      try {
+        const response = await getAvailableModels();
+        if (response.success) {
+          setAvailableModels(response.models);
+          setSelectedModel(response.current_model || null);
+          setResourceLevel(response.resource_level);
+        }
+      } catch (e) {
+        console.error('Failed to load models:', e);
+      } finally {
+        setLoadingModels(false);
+      }
+    };
+    loadModels();
+  }, []);
+
+  // Handle model selection
+  const handleModelSelect = useCallback(async (modelName: string | null) => {
+    if (modelName === null) {
+      // Enable auto-select
+      setAutoSelectModel(true);
+      setSelectedModel(null);
+      setShowModelSelector(false);
+      return;
+    }
+    
+    const result = await selectModel({ model: modelName, auto_select: false });
+    if (result.success) {
+      setSelectedModel(result.selected_model);
+      setAutoSelectModel(false);
+    }
+    setShowModelSelector(false);
   }, []);
 
   // Open project (defined first to avoid circular dependency)
@@ -359,27 +405,160 @@ export function IDE() {
     });
   }, []);
 
+  // Автоопределение языка из кода
+  const detectLanguageFromCode = useCallback((code: string, taskText: string): { language: string; extension: string; displayName: string } => {
+    const codeLower = code.toLowerCase();
+    const taskLower = taskText.toLowerCase();
+    
+    // Приоритет 1: Явные признаки в задаче
+    const taskPatterns: Record<string, { language: string; extension: string; displayName: string }> = {
+      'python': { language: 'python', extension: 'py', displayName: 'Python' },
+      'питон': { language: 'python', extension: 'py', displayName: 'Python' },
+      'javascript': { language: 'javascript', extension: 'js', displayName: 'JavaScript' },
+      'typescript': { language: 'typescript', extension: 'ts', displayName: 'TypeScript' },
+      'html': { language: 'html', extension: 'html', displayName: 'HTML' },
+      'react': { language: 'typescriptreact', extension: 'tsx', displayName: 'React TSX' },
+      'vue': { language: 'vue', extension: 'vue', displayName: 'Vue' },
+      'go': { language: 'go', extension: 'go', displayName: 'Go' },
+      'golang': { language: 'go', extension: 'go', displayName: 'Go' },
+      'rust': { language: 'rust', extension: 'rs', displayName: 'Rust' },
+      'java': { language: 'java', extension: 'java', displayName: 'Java' },
+      'kotlin': { language: 'kotlin', extension: 'kt', displayName: 'Kotlin' },
+      'swift': { language: 'swift', extension: 'swift', displayName: 'Swift' },
+      'c++': { language: 'cpp', extension: 'cpp', displayName: 'C++' },
+      'cpp': { language: 'cpp', extension: 'cpp', displayName: 'C++' },
+      'c#': { language: 'csharp', extension: 'cs', displayName: 'C#' },
+      'csharp': { language: 'csharp', extension: 'cs', displayName: 'C#' },
+      'php': { language: 'php', extension: 'php', displayName: 'PHP' },
+      'ruby': { language: 'ruby', extension: 'rb', displayName: 'Ruby' },
+      'bash': { language: 'shell', extension: 'sh', displayName: 'Bash' },
+      'shell': { language: 'shell', extension: 'sh', displayName: 'Shell' },
+      'sql': { language: 'sql', extension: 'sql', displayName: 'SQL' },
+    };
+    
+    for (const [pattern, info] of Object.entries(taskPatterns)) {
+      if (taskLower.includes(pattern)) {
+        return info;
+      }
+    }
+    
+    // Приоритет 2: Анализ кода
+    // HTML
+    if (code.includes('<!DOCTYPE') || code.includes('<html') || 
+        (code.includes('<body') && code.includes('</body>')) ||
+        (code.includes('<div') && code.includes('</div>'))) {
+      return { language: 'html', extension: 'html', displayName: 'HTML' };
+    }
+    
+    // React/TSX
+    if ((code.includes('import React') || code.includes('from "react"') || code.includes("from 'react'")) &&
+        (code.includes('tsx') || code.includes('<') && code.includes('/>'))) {
+      return { language: 'typescriptreact', extension: 'tsx', displayName: 'React TSX' };
+    }
+    
+    // TypeScript
+    if (code.includes(': string') || code.includes(': number') || code.includes(': boolean') ||
+        code.includes('interface ') || code.includes(': void') || code.includes('<T>')) {
+      return { language: 'typescript', extension: 'ts', displayName: 'TypeScript' };
+    }
+    
+    // Python
+    if (code.includes('def ') || code.includes('import ') || code.includes('class ') ||
+        code.includes('print(') || code.includes('if __name__') || code.includes('async def')) {
+      return { language: 'python', extension: 'py', displayName: 'Python' };
+    }
+    
+    // JavaScript
+    if (code.includes('function ') || code.includes('const ') || code.includes('let ') ||
+        code.includes('console.') || code.includes('require(') || code.includes('module.exports')) {
+      return { language: 'javascript', extension: 'js', displayName: 'JavaScript' };
+    }
+    
+    // Go
+    if (code.includes('package main') || code.includes('func ') || code.includes('import "')) {
+      return { language: 'go', extension: 'go', displayName: 'Go' };
+    }
+    
+    // Rust
+    if (code.includes('fn main') || code.includes('fn ') || code.includes('let mut ') || code.includes('impl ')) {
+      return { language: 'rust', extension: 'rs', displayName: 'Rust' };
+    }
+    
+    // Java
+    if (code.includes('public class') || code.includes('public static void main')) {
+      return { language: 'java', extension: 'java', displayName: 'Java' };
+    }
+    
+    // C++
+    if (code.includes('#include <') || code.includes('std::') || code.includes('int main(')) {
+      return { language: 'cpp', extension: 'cpp', displayName: 'C++' };
+    }
+    
+    // C#
+    if (code.includes('namespace ') || code.includes('using System') || code.includes('public class')) {
+      return { language: 'csharp', extension: 'cs', displayName: 'C#' };
+    }
+    
+    // PHP
+    if (code.includes('<?php') || code.includes('<?=')) {
+      return { language: 'php', extension: 'php', displayName: 'PHP' };
+    }
+    
+    // Ruby
+    if (code.includes('def ') && code.includes('end') && !code.includes('python')) {
+      return { language: 'ruby', extension: 'rb', displayName: 'Ruby' };
+    }
+    
+    // Bash/Shell
+    if (code.includes('#!/bin/bash') || code.includes('#!/bin/sh') || 
+        (code.includes('echo ') && code.includes('fi'))) {
+      return { language: 'shell', extension: 'sh', displayName: 'Bash' };
+    }
+    
+    // SQL
+    if (codeLower.includes('select ') && codeLower.includes('from ')) {
+      return { language: 'sql', extension: 'sql', displayName: 'SQL' };
+    }
+    
+    // Дефолт: Python (самый универсальный)
+    return { language: 'python', extension: 'py', displayName: 'Python' };
+  }, []);
+
   // Generate code
   const handleGenerate = useCallback(async () => {
     if (!task.trim()) return;
     setGenerating(true);
     setError(null);
+    setDetectedStack(null);
     
     try {
       const activeContent = openFiles.find(f => f.path === activeFile)?.content;
       
+      // Не передаём фиксированный язык - пусть бэкенд определит сам
+      // Передаём выбранную модель если не автовыбор
       const response = await executeTask({
         task,
         agent_type: 'code_writer',
-        context: { existing_code: activeContent || '', language }
+        context: { existing_code: activeContent || '' },
+        model: autoSelectModel ? undefined : selectedModel || undefined,
+        provider: autoSelectModel ? undefined : 'ollama'
       });
       
       if (response.success && response.result?.code) {
         const code = response.result.code;
-        const fileName = `generated.${language === 'python' ? 'py' : language === 'html' ? 'html' : language === 'typescript' ? 'ts' : 'js'}`;
-        createNewFile(fileName, code, language);
+        
+        // Автоопределение языка из сгенерированного кода
+        const detected = detectLanguageFromCode(code, task);
+        setDetectedStack(detected.displayName);
+        
+        // Генерируем имя файла на основе задачи
+        const taskWords = task.toLowerCase().replace(/[^a-zа-яё0-9\s]/gi, '').split(/\s+/).slice(0, 3);
+        const baseName = taskWords.length > 0 ? taskWords.join('_').substring(0, 30) : 'generated';
+        const fileName = `${baseName}.${detected.extension}`;
+        
+        createNewFile(fileName, code, detected.language);
         setBottomPanelOpen(true);
-        setRunResult('✅ Код успешно сгенерирован!');
+        setRunResult(`✅ Код успешно сгенерирован!\n📦 Определён стек: ${detected.displayName}`);
       } else {
         setError('Не удалось сгенерировать код');
       }
@@ -388,7 +567,7 @@ export function IDE() {
     } finally {
       setGenerating(false);
     }
-  }, [task, language, activeFile, openFiles, createNewFile]);
+  }, [task, activeFile, openFiles, createNewFile, detectLanguageFromCode]);
 
   // Run code
   const handleRun = useCallback(async () => {
@@ -713,25 +892,119 @@ export function IDE() {
         {/* Toolbar */}
         <div className="flex items-center gap-2 px-3 py-2 bg-[#131524] border-b border-[#1f2236]">
           {/* Task Input */}
-          <div className="flex-1 flex items-center gap-2 bg-[#0f111b] border border-[#1f2236] rounded-lg px-3 py-1.5">
+          <div className="flex-1 flex items-center gap-2 bg-[#0f111b] border border-[#1f2236] rounded-lg px-3 py-1.5 focus-within:border-blue-500/50 transition-colors">
+            <Sparkles size={14} strokeWidth={1.5} className="text-purple-400 shrink-0" />
             <input
               type="text"
               value={task}
               onChange={(e) => setTask(e.target.value)}
-              placeholder="Опишите что сгенерировать..."
+              placeholder="Опиши что создать: игра, API, скрипт, приложение..."
               className="flex-1 bg-transparent text-sm text-white placeholder-gray-500 focus:outline-none"
               onKeyPress={(e) => e.key === 'Enter' && handleGenerate()}
             />
-            <select
-              value={language}
-              onChange={(e) => setLanguage(e.target.value as any)}
-              className="px-2 py-1 text-xs bg-transparent border-l border-[#1f2236] text-gray-300 focus:outline-none cursor-pointer"
+            {/* Автоопределённый стек */}
+            {detectedStack && (
+              <div className="flex items-center gap-1.5 px-2 py-0.5 bg-green-900/30 border border-green-700/50 rounded text-xs text-green-300">
+                <Cpu size={12} strokeWidth={1.5} />
+                <span>{detectedStack}</span>
+              </div>
+            )}
+            {generating && (
+              <div className="flex items-center gap-1.5 px-2 py-0.5 bg-blue-900/30 border border-blue-700/50 rounded text-xs text-blue-300">
+                <Loader2 size={12} strokeWidth={1.5} className="animate-spin" />
+                <span>Определяю стек...</span>
+              </div>
+            )}
+          </div>
+          
+          {/* Model Selector */}
+          <div className="relative">
+            <button
+              onClick={() => setShowModelSelector(!showModelSelector)}
+              className="px-2 py-1.5 bg-[#0f111b] border border-[#1f2236] hover:border-purple-500/50 rounded-lg text-xs transition-colors flex items-center gap-1.5"
+              title="Выбор модели"
             >
-              <option value="python" className="bg-[#0f111b]">Python</option>
-              <option value="javascript" className="bg-[#0f111b]">JavaScript</option>
-              <option value="typescript" className="bg-[#0f111b]">TypeScript</option>
-              <option value="html" className="bg-[#0f111b]">HTML</option>
-            </select>
+              <Cpu size={14} strokeWidth={1.5} className="text-purple-400" />
+              <span className="text-gray-300 max-w-[100px] truncate">
+                {loadingModels ? '...' : autoSelectModel ? 'Авто' : (selectedModel?.split(':')[0] || 'Авто')}
+              </span>
+              <ChevronUp size={12} className={`text-gray-500 transition-transform ${showModelSelector ? '' : 'rotate-180'}`} />
+            </button>
+            
+            {showModelSelector && (
+              <div className="absolute right-0 top-full mt-1 w-72 bg-[#1a1d2e] border border-[#2a2f46] rounded-lg shadow-xl z-50 max-h-[400px] overflow-y-auto">
+                <div className="p-2 border-b border-[#2a2f46]">
+                  <div className="text-xs text-gray-400 mb-1">Выбор модели</div>
+                  <div className="text-[10px] text-gray-500">
+                    Ресурсы: <span className={`font-medium ${
+                      resourceLevel === 'high' ? 'text-green-400' : 
+                      resourceLevel === 'medium' ? 'text-yellow-400' : 
+                      resourceLevel === 'low' ? 'text-orange-400' : 'text-gray-400'
+                    }`}>{resourceLevel}</span>
+                  </div>
+                </div>
+                
+                {/* Auto-select option */}
+                <button
+                  onClick={() => handleModelSelect(null)}
+                  className={`w-full px-3 py-2 text-left text-xs hover:bg-[#252840] transition-colors flex items-center gap-2 ${
+                    autoSelectModel ? 'bg-purple-900/30 border-l-2 border-purple-500' : ''
+                  }`}
+                >
+                  <Brain size={14} className="text-purple-400" />
+                  <div className="flex-1">
+                    <div className="font-medium text-white">Автовыбор</div>
+                    <div className="text-[10px] text-gray-500">Оптимальная модель под задачу</div>
+                  </div>
+                  {autoSelectModel && <CircleCheck size={14} className="text-purple-400" />}
+                </button>
+                
+                <div className="border-t border-[#2a2f46]" />
+                
+                {/* Model list */}
+                {availableModels.map((model) => (
+                  <button
+                    key={`${model.provider}:${model.name}`}
+                    onClick={() => handleModelSelect(model.name)}
+                    className={`w-full px-3 py-2 text-left text-xs hover:bg-[#252840] transition-colors flex items-center gap-2 ${
+                      !autoSelectModel && selectedModel === model.name ? 'bg-blue-900/30 border-l-2 border-blue-500' : ''
+                    }`}
+                  >
+                    <div className="w-6 h-6 rounded bg-[#0f111b] flex items-center justify-center shrink-0">
+                      {model.provider === 'ollama' ? (
+                        <Cpu size={12} className="text-blue-400" />
+                      ) : model.provider === 'openai' ? (
+                        <Brain size={12} className="text-green-400" />
+                      ) : (
+                        <Sparkles size={12} className="text-orange-400" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium text-white truncate flex items-center gap-1">
+                        {model.name}
+                        {model.is_recommended && (
+                          <span className="text-[9px] px-1 py-0.5 bg-yellow-900/50 text-yellow-400 rounded">★</span>
+                        )}
+                      </div>
+                      <div className="text-[10px] text-gray-500 flex items-center gap-2">
+                        {model.size && <span>{model.size}</span>}
+                        <span className="text-green-400">Q:{Math.round(model.quality_score * 100)}%</span>
+                        <span className="text-blue-400">S:{Math.round(model.speed_score * 100)}%</span>
+                      </div>
+                    </div>
+                    {!autoSelectModel && selectedModel === model.name && (
+                      <CircleCheck size={14} className="text-blue-400 shrink-0" />
+                    )}
+                  </button>
+                ))}
+                
+                {availableModels.length === 0 && (
+                  <div className="px-3 py-4 text-xs text-gray-500 text-center">
+                    {loadingModels ? 'Загрузка моделей...' : 'Нет доступных моделей'}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
           
           {/* Buttons */}
@@ -739,17 +1012,19 @@ export function IDE() {
             onClick={handleGenerate}
             disabled={generating || !task.trim()}
             className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5"
+            title="Генерировать код или получить ответ (Enter)"
           >
             {generating ? <Loader2 size={14} strokeWidth={1.5} className="animate-spin" /> : <Sparkles size={14} strokeWidth={1.5} />}
-            <span>Генерация</span>
+            <span className="hidden sm:inline">Генерация</span>
           </button>
           <button
             onClick={handleRun}
             disabled={running || !activeFile}
             className="px-3 py-1.5 bg-green-600 hover:bg-green-700 disabled:opacity-50 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5"
+            title="Запустить текущий код"
           >
             {running ? <Loader2 size={14} strokeWidth={1.5} className="animate-spin" /> : <Play size={14} strokeWidth={1.5} />}
-            <span>Запуск</span>
+            <span className="hidden sm:inline">Запуск</span>
           </button>
         </div>
 

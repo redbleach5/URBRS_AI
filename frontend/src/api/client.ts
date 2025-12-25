@@ -31,6 +31,36 @@ export interface TaskRequest {
   task: string;
   agent_type?: string;
   context?: Record<string, any>;
+  model?: string;  // Выбранная модель (undefined = автовыбор)
+  provider?: string;  // Выбранный провайдер
+}
+
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface ChatRequest {
+  message: string;
+  history?: ChatMessage[];
+  mode?: 'general' | 'ide' | 'research';
+  context?: Record<string, any>;
+  model?: string;  // Выбранная модель (undefined = автовыбор)
+  provider?: string;  // Выбранный провайдер
+}
+
+export interface ChatResponse {
+  success: boolean;
+  message: string;
+  error?: string;
+  metadata?: {
+    model?: string;
+    provider?: string;
+    mode?: string;
+    has_thinking?: boolean;
+    thinking?: string;
+    web_search_used?: boolean;
+  };
 }
 
 export async function executeTask(request: TaskRequest, signal?: AbortSignal) {
@@ -42,6 +72,25 @@ export async function executeTask(request: TaskRequest, signal?: AbortSignal) {
     return response.data;
   } catch (error: any) {
     throw error;
+  }
+}
+
+/**
+ * Простой чат без агентов - для быстрых ответов, шуток, новостей и т.д.
+ */
+export async function sendChat(request: ChatRequest, signal?: AbortSignal): Promise<ChatResponse> {
+  try {
+    const response = await client.post('/chat', request, {
+      signal,
+      timeout: 120000, // 2 minutes for chat
+    });
+    return response.data;
+  } catch (error: any) {
+    return {
+      success: false,
+      message: '',
+      error: error.message || 'Ошибка отправки сообщения'
+    };
   }
 }
 
@@ -216,6 +265,92 @@ export async function checkOllamaServer(): Promise<any> {
       models: [],
       base_url: null,
       error: 'unknown_error'
+    };
+  }
+}
+
+// Models API
+export interface ModelInfo {
+  name: string;
+  provider: string;
+  size?: string;
+  capabilities: string[];
+  quality_score: number;
+  speed_score: number;
+  is_available: boolean;
+  is_recommended: boolean;
+  description?: string;
+}
+
+export interface ModelsResponse {
+  success: boolean;
+  models: ModelInfo[];
+  current_model?: string;
+  auto_select_enabled: boolean;
+  resource_level: string;
+}
+
+export interface ModelSelectRequest {
+  model?: string;
+  provider?: string;
+  auto_select?: boolean;
+}
+
+export interface ModelSelectResponse {
+  success: boolean;
+  selected_model: string;
+  provider: string;
+  auto_selected: boolean;
+  reason: string;
+}
+
+export async function getAvailableModels(): Promise<ModelsResponse> {
+  try {
+    const response = await client.get('/models', { timeout: 15000 });
+    return response.data;
+  } catch (error: any) {
+    return {
+      success: false,
+      models: [],
+      auto_select_enabled: true,
+      resource_level: 'unknown'
+    };
+  }
+}
+
+export async function selectModel(request: ModelSelectRequest): Promise<ModelSelectResponse> {
+  try {
+    const response = await client.post('/models/select', request);
+    return response.data;
+  } catch (error: any) {
+    return {
+      success: false,
+      selected_model: '',
+      provider: '',
+      auto_selected: true,
+      reason: error.message || 'Ошибка выбора модели'
+    };
+  }
+}
+
+export async function getRecommendedModel(
+  taskType?: string,
+  complexity?: string,
+  speedPriority?: boolean
+): Promise<any> {
+  try {
+    const params = new URLSearchParams();
+    if (taskType) params.append('task_type', taskType);
+    if (complexity) params.append('complexity', complexity);
+    if (speedPriority) params.append('speed_priority', 'true');
+    
+    const response = await client.get(`/models/recommend?${params.toString()}`, { timeout: 10000 });
+    return response.data;
+  } catch (error: any) {
+    return {
+      success: false,
+      recommended: null,
+      reason: error.message || 'Ошибка получения рекомендации'
     };
   }
 }

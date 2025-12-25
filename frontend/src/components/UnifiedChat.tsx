@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { executeTask, processBatchTasks, executeTool } from '../api/client';
+import { executeTask, processBatchTasks, executeTool, sendChat, ChatMessage as APIChatMessage, getAvailableModels, selectModel, ModelInfo } from '../api/client';
 import { useChatStore, ChatMode } from '../state/chatStore';
 import { useExecutionInfo } from '../state/executionContext';
 import { LearningProgress } from './LearningProgress';
@@ -544,11 +544,35 @@ const AGENTS = [
   { id: 'monitoring', name: 'Мониторинг', description: 'Мониторинг производительности системы' },
 ];
 
-const MODE_INFO: Record<ChatMode, { name: string; description: string; icon: LucideIcon }> = {
-  chat: { name: 'Чат', description: 'Обычный режим общения', icon: MessageSquare },
-  task: { name: 'Задачи', description: 'Выполнение сложных задач', icon: Zap },
-  agent: { name: 'Агенты', description: 'Работа с конкретным агентом', icon: Bot },
-  batch: { name: 'Пакетная обработка', description: 'Обработка нескольких задач', icon: RefreshCw },
+const MODE_INFO: Record<ChatMode, { name: string; description: string; icon: LucideIcon; placeholder: string; examples: string[] }> = {
+  chat: { 
+    name: 'Ассистент', 
+    description: 'Универсальный помощник: новости, шутки, советы, команды Linux', 
+    icon: MessageSquare,
+    placeholder: 'Спросите что угодно: новости, погода, шутка, команда Linux...',
+    examples: ['📰 Последние новости о ценах на видеокарты', '😄 Расскажи анекдот про программистов', '🐧 Как найти файл в Linux?', '💡 Дай совет по тайм-менеджменту']
+  },
+  task: { 
+    name: 'Задачи', 
+    description: 'Выполнение сложных задач с помощью агентов', 
+    icon: Zap,
+    placeholder: 'Опишите задачу: создать игру, проанализировать код, исследовать тему...',
+    examples: ['🎮 Создай игру змейка на HTML/JS', '🔍 Проанализируй архитектуру проекта', '📊 Сравни React и Vue.js', '🛠️ Напиши скрипт для бэкапа']
+  },
+  agent: { 
+    name: 'Агенты', 
+    description: 'Работа с конкретным специализированным агентом', 
+    icon: Bot,
+    placeholder: 'Задача для выбранного агента...',
+    examples: ['💻 Code Writer: Напиши REST API', '🔬 Research: Исследуй тему', '📈 Data Analysis: Проанализируй данные']
+  },
+  batch: { 
+    name: 'Пакетная', 
+    description: 'Обработка нескольких задач одновременно', 
+    icon: RefreshCw,
+    placeholder: 'Введите задачи (каждая с новой строки)...',
+    examples: ['Задача 1', 'Задача 2', 'Задача 3']
+  },
 };
 
 export function UnifiedChat() {
@@ -562,6 +586,14 @@ export function UnifiedChat() {
   // State for code execution
   const [runningCodeId, setRunningCodeId] = useState<string | null>(null);
   const [codeExecutionResults, setCodeExecutionResults] = useState<Record<string, { result: string | null; htmlPreviewUrl: string | null }>>({});
+  
+  // Model selection state
+  const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [autoSelectModel, setAutoSelectModel] = useState(true);
+  const [showModelSelector, setShowModelSelector] = useState(false);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [resourceLevel, setResourceLevel] = useState<string>('unknown');
 
   const {
     conversations,
@@ -644,6 +676,44 @@ export function UnifiedChat() {
     }
   }, [currentMode]);
 
+  // Load available models on mount
+  useEffect(() => {
+    const loadModels = async () => {
+      setLoadingModels(true);
+      try {
+        const response = await getAvailableModels();
+        if (response.success) {
+          setAvailableModels(response.models);
+          setSelectedModel(response.current_model || null);
+          setResourceLevel(response.resource_level);
+        }
+      } catch (e) {
+        console.error('Failed to load models:', e);
+      } finally {
+        setLoadingModels(false);
+      }
+    };
+    loadModels();
+  }, []);
+
+  // Handle model selection
+  const handleModelSelect = async (modelName: string | null) => {
+    if (modelName === null) {
+      // Enable auto-select
+      setAutoSelectModel(true);
+      setSelectedModel(null);
+      setShowModelSelector(false);
+      return;
+    }
+    
+    const result = await selectModel({ model: modelName, auto_select: false });
+    if (result.success) {
+      setSelectedModel(result.selected_model);
+      setAutoSelectModel(false);
+    }
+    setShowModelSelector(false);
+  };
+
   const handleModeChange = (mode: ChatMode) => {
     setCurrentMode(mode);
     // Don't create new conversations when switching modes
@@ -713,6 +783,40 @@ export function UnifiedChat() {
           status: response.failed === 0 ? 'completed' : 'error',
           result: response,
         });
+      } else if (currentMode === 'chat') {
+        // Режим простого чата - без агентов, быстрые ответы
+        setExecutionInfo({ agent: 'Ассистент', models: [] });
+        
+        // Собираем историю сообщений для контекста
+        const history: APIChatMessage[] = messages.slice(-10).map(m => ({
+          role: m.role as 'user' | 'assistant',
+          content: m.content
+        }));
+        
+        const chatResponse = await sendChat({
+          message: inputToProcess,
+          history,
+          mode: 'general',
+          context: {},
+          model: autoSelectModel ? undefined : selectedModel || undefined,
+          provider: autoSelectModel ? undefined : 'ollama'
+        });
+        
+        if (chatResponse.success) {
+          updateMessage(convId, assistantMessageId, {
+            content: chatResponse.message,
+            status: 'completed',
+            metadata: chatResponse.metadata
+          });
+        } else {
+          updateMessage(convId, assistantMessageId, {
+            content: `❌ Ошибка: ${chatResponse.error}`,
+            status: 'error'
+          });
+        }
+        
+        setIsLoading(false);
+        return;
       } else {
         const agentType = currentMode === 'agent' && selectedAgent ? selectedAgent : undefined;
         
@@ -721,13 +825,15 @@ export function UnifiedChat() {
           const agentName = AGENTS.find(a => a.id === agentType)?.name || agentType;
           setExecutionInfo({ agent: agentName, models: [] });
         } else {
-          setExecutionInfo({ agent: 'Автовыбор', models: [] });
+          setExecutionInfo({ agent: 'Оркестратор', models: [] });
         }
 
         response = await executeTask({
           task: inputToProcess,
           agent_type: agentType,
           context: {},
+          model: autoSelectModel ? undefined : selectedModel || undefined,
+          provider: autoSelectModel ? undefined : 'ollama'
         });
 
 
@@ -1334,36 +1440,24 @@ export function UnifiedChat() {
                     </div>
                     <h2 className="text-2xl font-bold mb-2 text-gray-100">Добро пожаловать в {MODE_INFO[currentMode].name}</h2>
                     <p className="text-gray-400 mb-6 text-sm">{MODE_INFO[currentMode].description}</p>
-                    {currentMode === 'chat' && (
+                    {/* Примеры для текущего режима */}
+                    {(currentMode === 'chat' || currentMode === 'task') && (
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-2 max-w-3xl mx-auto text-left">
-                        <div className="p-3 bg-gradient-to-br from-[#1a1d2e] to-[#0f111b] rounded-lg border border-[#2a2f46] hover:border-[#3a3f56] transition-all duration-200 cursor-pointer group">
-                          <div className="font-semibold mb-1 text-gray-100 flex items-center gap-1.5 text-sm">
-                            <span>🎮</span>
-                            <span>Простые</span>
-                        </div>
-                          <div className="text-xs text-gray-400 group-hover:text-gray-300 transition-colors">Игра змейка</div>
-                        </div>
-                        <div className="p-3 bg-gradient-to-br from-[#1a1d2e] to-[#0f111b] rounded-lg border border-[#2a2f46] hover:border-[#3a3f56] transition-all duration-200 cursor-pointer group">
-                          <div className="font-semibold mb-1 text-gray-100 flex items-center gap-1.5 text-sm">
-                            <span>☁️</span>
-                            <span>Сложные</span>
-                        </div>
-                          <div className="text-xs text-gray-400 group-hover:text-gray-300 transition-colors">Облако</div>
-                        </div>
-                        <div className="p-3 bg-gradient-to-br from-[#1a1d2e] to-[#0f111b] rounded-lg border border-[#2a2f46] hover:border-[#3a3f56] transition-all duration-200 cursor-pointer group">
-                          <div className="font-semibold mb-1 text-gray-100 flex items-center gap-1.5 text-sm">
-                            <Code size={14} strokeWidth={1.5} className="text-purple-400" />
-                            <span>Разработка</span>
+                        {MODE_INFO[currentMode].examples.map((example, idx) => (
+                          <div 
+                            key={idx}
+                            onClick={() => {
+                              // Убираем эмодзи в начале для отправки
+                              const cleanExample = example.replace(/^[^\w\sа-яА-ЯёЁ]+\s*/, '');
+                              setInput(cleanExample);
+                            }}
+                            className="p-3 bg-gradient-to-br from-[#1a1d2e] to-[#0f111b] rounded-lg border border-[#2a2f46] hover:border-blue-500/50 transition-all duration-200 cursor-pointer group hover:shadow-lg hover:shadow-blue-500/10"
+                          >
+                            <div className="text-sm text-gray-300 group-hover:text-white transition-colors line-clamp-2">
+                              {example}
+                            </div>
                           </div>
-                          <div className="text-xs text-gray-400 group-hover:text-gray-300 transition-colors">IDE</div>
-                        </div>
-                        <div className="p-3 bg-gradient-to-br from-[#1a1d2e] to-[#0f111b] rounded-lg border border-[#2a2f46] hover:border-[#3a3f56] transition-all duration-200 cursor-pointer group">
-                          <div className="font-semibold mb-1 text-gray-100 flex items-center gap-1.5 text-sm">
-                            <Zap size={14} strokeWidth={1.5} className="text-yellow-400" />
-                            <span>Оптимизация</span>
-                          </div>
-                          <div className="text-xs text-gray-400 group-hover:text-gray-300 transition-colors">LLM модуль</div>
-                        </div>
+                        ))}
                       </div>
                     )}
                     {currentMode === 'batch' && (
@@ -1958,6 +2052,98 @@ export function UnifiedChat() {
                       </div>
                     )}
 
+                    {/* Model Selector */}
+                    <div className="relative flex-shrink-0 model-dropdown">
+                      <button
+                        type="button"
+                        onClick={() => setShowModelSelector(!showModelSelector)}
+                        className="px-2 py-2.5 h-full bg-transparent hover:bg-[#1f2236] transition-colors flex items-center gap-1 text-xs font-medium text-gray-400 border-r border-[#1f2236]"
+                        title="Выбор модели"
+                      >
+                        <Brain size={12} strokeWidth={1.5} className="text-purple-400" />
+                        <span className="hidden sm:inline text-[10px] max-w-[60px] truncate">
+                          {loadingModels ? '...' : autoSelectModel ? 'Авто' : (selectedModel?.split(':')[0] || 'Авто')}
+                        </span>
+                        <ChevronDown size={10} strokeWidth={1.5} />
+                      </button>
+                      {showModelSelector && (
+                        <div className="absolute bottom-full left-0 mb-2 w-72 bg-[#1a1d2e] border border-[#2a2f46] rounded-lg shadow-xl z-30 max-h-[350px] overflow-y-auto">
+                          <div className="p-2 border-b border-[#2a2f46]">
+                            <div className="text-xs text-gray-400 mb-1">Выбор модели</div>
+                            <div className="text-[10px] text-gray-500">
+                              Ресурсы: <span className={`font-medium ${
+                                resourceLevel === 'high' ? 'text-green-400' : 
+                                resourceLevel === 'medium' ? 'text-yellow-400' : 
+                                resourceLevel === 'low' ? 'text-orange-400' : 'text-gray-400'
+                              }`}>{resourceLevel}</span>
+                            </div>
+                          </div>
+                          
+                          {/* Auto-select option */}
+                          <button
+                            type="button"
+                            onClick={() => handleModelSelect(null)}
+                            className={`w-full px-3 py-2 text-left text-xs hover:bg-[#252840] transition-colors flex items-center gap-2 ${
+                              autoSelectModel ? 'bg-purple-900/30 border-l-2 border-purple-500' : ''
+                            }`}
+                          >
+                            <Brain size={14} className="text-purple-400" />
+                            <div className="flex-1">
+                              <div className="font-medium text-white">Автовыбор</div>
+                              <div className="text-[10px] text-gray-500">Оптимальная модель под задачу</div>
+                            </div>
+                            {autoSelectModel && <CircleCheck size={14} className="text-purple-400" />}
+                          </button>
+                          
+                          <div className="border-t border-[#2a2f46]" />
+                          
+                          {/* Model list */}
+                          {availableModels.map((model) => (
+                            <button
+                              key={`${model.provider}:${model.name}`}
+                              type="button"
+                              onClick={() => handleModelSelect(model.name)}
+                              className={`w-full px-3 py-2 text-left text-xs hover:bg-[#252840] transition-colors flex items-center gap-2 ${
+                                !autoSelectModel && selectedModel === model.name ? 'bg-blue-900/30 border-l-2 border-blue-500' : ''
+                              }`}
+                            >
+                              <div className="w-5 h-5 rounded bg-[#0f111b] flex items-center justify-center shrink-0">
+                                {model.provider === 'ollama' ? (
+                                  <Code size={10} className="text-blue-400" />
+                                ) : model.provider === 'openai' ? (
+                                  <Brain size={10} className="text-green-400" />
+                                ) : (
+                                  <Zap size={10} className="text-orange-400" />
+                                )}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="font-medium text-white truncate flex items-center gap-1">
+                                  {model.name}
+                                  {model.is_recommended && (
+                                    <span className="text-[8px] px-1 py-0.5 bg-yellow-900/50 text-yellow-400 rounded">★</span>
+                                  )}
+                                </div>
+                                <div className="text-[10px] text-gray-500 flex items-center gap-2">
+                                  {model.size && <span>{model.size}</span>}
+                                  <span className="text-green-400">Q:{Math.round(model.quality_score * 100)}%</span>
+                                  <span className="text-blue-400">S:{Math.round(model.speed_score * 100)}%</span>
+                                </div>
+                              </div>
+                              {!autoSelectModel && selectedModel === model.name && (
+                                <CircleCheck size={12} className="text-blue-400 shrink-0" />
+                              )}
+                            </button>
+                          ))}
+                          
+                          {availableModels.length === 0 && (
+                            <div className="px-3 py-4 text-xs text-gray-500 text-center">
+                              {loadingModels ? 'Загрузка моделей...' : 'Нет доступных моделей'}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
                     {/* Textarea */}
                     <textarea
                       ref={inputRef}
@@ -1970,8 +2156,8 @@ export function UnifiedChat() {
                       onKeyDown={handleKeyDown}
                       placeholder={
                         currentMode === 'agent' && selectedAgent
-                          ? `Введите задачу для ${AGENTS.find(a => a.id === selectedAgent)?.name}...`
-                          : 'Введите вашу задачу... (Enter для отправки, Shift+Enter для новой строки)'
+                          ? `Задача для ${AGENTS.find(a => a.id === selectedAgent)?.name}...`
+                          : MODE_INFO[currentMode].placeholder
                       }
                       className="flex-1 px-4 py-2.5 min-h-[42px] bg-transparent text-white placeholder-gray-500 resize-none focus:outline-none max-h-[150px] transition-all duration-200 text-sm leading-relaxed"
                       rows={1}

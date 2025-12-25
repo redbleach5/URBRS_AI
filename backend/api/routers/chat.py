@@ -1,0 +1,215 @@
+"""
+Chat router - Простой универсальный чат без агентов
+Для быстрых ответов, шуток, новостей, команд Linux и т.д.
+"""
+
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
+from typing import Optional, Dict, Any, List
+from datetime import datetime
+
+from backend.core.logger import get_logger
+from backend.llm.base import LLMMessage
+
+logger = get_logger(__name__)
+
+router = APIRouter()
+
+
+class ChatMessage(BaseModel):
+    role: str  # "user" или "assistant"
+    content: str
+
+
+class ChatRequest(BaseModel):
+    message: str
+    history: Optional[List[ChatMessage]] = None
+    mode: Optional[str] = "general"  # general, ide, research
+    context: Optional[Dict[str, Any]] = None
+    model: Optional[str] = None  # Выбранная модель (None = автовыбор)
+    provider: Optional[str] = None  # Выбранный провайдер
+
+
+class ChatResponse(BaseModel):
+    success: bool
+    message: str
+    error: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+# Системные промпты для разных режимов
+SYSTEM_PROMPTS = {
+    "general": """Ты — универсальный AI-ассистент. Ты можешь:
+- Отвечать на любые вопросы
+- Шутить и поддерживать непринуждённую беседу
+- Искать информацию и давать сводки по новостям
+- Объяснять команды Linux, технологии, концепции
+- Помогать с повседневными задачами
+- Давать советы и рекомендации
+
+Отвечай на русском языке, будь дружелюбным и полезным.
+Используй эмодзи где уместно. Форматируй ответы с markdown для лучшей читаемости.
+Текущая дата: {current_date}""",
+
+    "ide": """Ты — опытный программист и разработчик. Ты можешь:
+- Писать и анализировать код на любых языках
+- Отлаживать и исправлять ошибки
+- Объяснять архитектуру и паттерны проектирования
+- Оптимизировать производительность кода
+- Ревьюить код и предлагать улучшения
+- Помогать с Git, Docker, CI/CD и DevOps
+
+Отвечай технически грамотно, с примерами кода когда уместно.
+Используй markdown с подсветкой синтаксиса для кода.
+Будь конкретен и точен в технических деталях.""",
+
+    "research": """Ты — эксперт-исследователь и аналитик. Ты можешь:
+- Глубоко анализировать темы и предоставлять исследования
+- Сравнивать технологии и подходы
+- Искать и обобщать информацию
+- Создавать структурированные отчёты
+- Анализировать тренды и прогнозировать развитие
+
+Предоставляй детальные, хорошо структурированные ответы.
+Указывай источники информации где возможно.
+Используй таблицы, списки и другое форматирование для наглядности."""
+}
+
+
+def get_system_prompt(mode: str) -> str:
+    """Получает системный промпт для режима с подстановкой даты"""
+    prompt = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPTS["general"])
+    current_date = datetime.now().strftime("%d %B %Y, %H:%M")
+    return prompt.format(current_date=current_date)
+
+
+@router.post("/chat", response_model=ChatResponse)
+async def chat(request: Request, chat_request: ChatRequest):
+    """
+    Простой чат без агентов — напрямую через LLM.
+    Быстрые ответы для повседневных вопросов.
+    """
+    logger.info(f"Chat request: mode={chat_request.mode}, message_length={len(chat_request.message)}")
+    
+    engine = request.app.state.engine
+    
+    if not engine:
+        raise HTTPException(status_code=503, detail="Движок не инициализирован")
+    
+    llm_manager = engine.llm_manager
+    
+    if not llm_manager:
+        raise HTTPException(status_code=503, detail="LLM провайдер не доступен")
+    
+    try:
+        # Формируем сообщения
+        messages = [
+            LLMMessage(
+                role="system",
+                content=get_system_prompt(chat_request.mode or "general")
+            )
+        ]
+        
+        # Добавляем историю если есть
+        if chat_request.history:
+            for msg in chat_request.history[-10:]:  # Последние 10 сообщений
+                messages.append(LLMMessage(
+                    role=msg.role,
+                    content=msg.content
+                ))
+        
+        # Добавляем текущее сообщение
+        messages.append(LLMMessage(
+            role="user",
+            content=chat_request.message
+        ))
+        
+        # Определяем нужен ли поиск в интернете
+        needs_search = any(keyword in chat_request.message.lower() for keyword in [
+            "новости", "news", "последние", "актуальные", "сегодня",
+            "цены", "курс", "погода", "события"
+        ])
+        
+        web_context = ""
+        if needs_search and engine.tool_registry:
+            try:
+                logger.info("Chat: Performing web search for context")
+                search_result = await engine.tool_registry.execute_tool(
+                    "web_search",
+                    {"query": chat_request.message, "max_results": 5}
+                )
+                
+                if search_result.success and search_result.result:
+                    results = search_result.result.get("results", [])
+                    if results:
+                        web_context = "\n\n📰 **Найденная информация из интернета:**\n"
+                        for i, result in enumerate(results[:3], 1):
+                            title = result.get('title', '').strip()
+                            snippet = result.get('snippet', '').strip()
+                            url = result.get('url', '').strip()
+                            web_context += f"\n{i}. **{title}**\n{snippet}\n[Источник]({url})\n"
+                        
+                        # Добавляем контекст к сообщению
+                        messages[-1] = LLMMessage(
+                            role="user",
+                            content=f"{chat_request.message}\n\n{web_context}\n\nИспользуй эту информацию для ответа."
+                        )
+            except Exception as e:
+                logger.warning(f"Chat web search failed: {e}")
+        
+        # Используем выбранную модель если указана
+        model_to_use = chat_request.model
+        provider_to_use = chat_request.provider
+        
+        # Если указана модель, устанавливаем её для провайдера
+        if model_to_use:
+            ollama_provider = llm_manager.providers.get("ollama")
+            if ollama_provider:
+                # Временно меняем модель по умолчанию
+                original_model = ollama_provider.default_model
+                ollama_provider.default_model = model_to_use
+                logger.info(f"Chat: Using manually selected model: {model_to_use}")
+        
+        # Генерируем ответ
+        response = await llm_manager.generate(
+            messages=messages,
+            provider_name=provider_to_use,
+            model=model_to_use,
+            temperature=0.7,
+            max_tokens=2000
+        )
+        
+        # Восстанавливаем оригинальную модель если меняли
+        if model_to_use:
+            ollama_provider = llm_manager.providers.get("ollama")
+            if ollama_provider and 'original_model' in locals():
+                ollama_provider.default_model = original_model
+        
+        return ChatResponse(
+            success=True,
+            message=response.content,
+            metadata={
+                "model": response.model,
+                "provider": getattr(response, 'provider', 'ollama'),
+                "mode": chat_request.mode,
+                "has_thinking": getattr(response, 'thinking', None) is not None,
+                "thinking": getattr(response, 'thinking', None),
+                "web_search_used": bool(web_context)
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Chat error: {e}", exc_info=True)
+        error_message = str(e)
+        
+        if "timeout" in error_message.lower():
+            error_message = "Превышено время ожидания. Попробуйте ещё раз."
+        elif "connection" in error_message.lower():
+            error_message = "Ошибка подключения к LLM. Проверьте настройки."
+        
+        return ChatResponse(
+            success=False,
+            message="",
+            error=error_message
+        )
+

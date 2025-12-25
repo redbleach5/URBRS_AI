@@ -52,6 +52,8 @@ class ReflectionResult:
     retry_suggestion: Optional[str] = None
     thinking_trace: Optional[str] = None
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    # Флаг для ошибок парсинга самой рефлексии (НЕ должны приводить к retry)
+    _parsing_failed: bool = False
     
     def to_dict(self) -> Dict[str, Any]:
         """Конвертирует в словарь"""
@@ -152,10 +154,15 @@ class ReflectionMixin:
             reflection.quality_level = self._determine_quality_level(reflection.overall_score)
             
             # Определяем, нужен ли retry
-            reflection.should_retry = (
-                reflection.overall_score < self._min_quality_threshold and
-                len(reflection.issues) > 0
-            )
+            # ВАЖНО: НЕ делаем retry если ошибка парсинга рефлексии (_parsing_failed=True)
+            # Это означает проблему с LLM/рефлексией, а не с результатом агента!
+            if reflection._parsing_failed:
+                reflection.should_retry = False
+            else:
+                reflection.should_retry = (
+                    reflection.overall_score < self._min_quality_threshold and
+                    len(reflection.issues) > 0
+                )
             
             # Сохраняем в историю
             self._reflection_history.append(reflection)
@@ -318,14 +325,17 @@ class ReflectionMixin:
             
         except (json.JSONDecodeError, ValueError) as e:
             logger.warning(f"Failed to parse reflection response: {e}")
-            # Возвращаем дефолтный результат
+            # Возвращаем дефолтный результат с маркером ошибки парсинга
+            # ВАЖНО: _parsing_failed=True означает, что это ошибка самой рефлексии,
+            # а НЕ проблема с результатом агента - retry НЕ нужен!
             return ReflectionResult(
                 completeness=50,
                 correctness=50,
                 quality=50,
                 overall_score=50,
                 issues=["Failed to parse reflection"],
-                should_retry=False
+                should_retry=False,
+                _parsing_failed=True  # Маркер ошибки парсинга рефлексии
             )
     
     def _determine_quality_level(self, score: float) -> ReflectionQuality:
