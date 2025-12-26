@@ -360,7 +360,11 @@ class ResourceAwareSelector:
         routing_decision: Optional[RoutingDecision] = None
         if self.distributed_router:
             try:
-                require_fast = quality_requirement == "fast" or complexity in ["trivial", "simple"]
+                # Research задачи НИКОГДА не используют fast модели (нужна точность)
+                if task_type == "research":
+                    require_fast = False
+                else:
+                    require_fast = quality_requirement == "fast" or complexity in ["trivial", "simple"]
                 routing_decision = await self.distributed_router.route_request(
                     preferred_model=preferred_model,
                     task_type=task_type or "chat",

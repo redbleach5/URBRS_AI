@@ -115,6 +115,13 @@ class DistributedModelRouter:
             "analysis": [
                 "gemma3:1b", "gemma3:4b",  # Маленькие для CPU
                 "gemma3:12b", "qwen2.5:14b", "llama3.1:8b"
+            ],
+            "research": [
+                # Для веб-поиска и цен - нужны модели с хорошим пониманием
+                "qwen2.5-coder:7b",  # Fallback - доступна локально
+                "qwen2.5:7b", "gemma3:4b",  # Предпочтительные
+                "qwen2.5:14b", "gemma3:12b", "llama3.1:8b",
+                "gemma3:1b"  # Последний fallback
             ]
         }
         
@@ -327,11 +334,16 @@ class DistributedModelRouter:
             logger.error("No Ollama servers available!")
             raise ConnectionError("No Ollama servers available")
         
-        # Определяем категорию моделей на основе сложности
-        if require_fast or complexity in ["trivial", "simple"]:
+        # Определяем категорию моделей
+        # ВАЖНО: require_fast=False явно означает НЕ использовать fast модели
+        if require_fast:
             model_category = "fast"
+        elif task_type in self.model_categories:
+            model_category = task_type  # Используем категорию по типу задачи
+        elif complexity in ["trivial", "simple"]:
+            model_category = "fast"  # Fallback на fast для простых задач без явного типа
         else:
-            model_category = task_type if task_type in self.model_categories else "chat"
+            model_category = "chat"
         
         # Ищем нужную модель
         candidates = self._get_model_candidates(preferred_model, model_category)

@@ -62,9 +62,11 @@ llm:
         research:
         - qwen2.5:7b          # Отличный для суммаризации
         - gemma3:4b           # Хороший русский, следует инструкциям
+        - qwen2.5-coder:7b    # Fallback - может работать с текстом
         - qwen2.5:14b         # Мощный анализ
         - gemma3:12b
         - llama3.1:8b         # Универсальный
+        - gemma3:1b           # Последний fallback (слабый)
         reasoning:
         - qwen3:14b
         - qwen3:8b

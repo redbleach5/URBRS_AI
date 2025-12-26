@@ -153,10 +153,22 @@ async def chat(request: Request, chat_request: ChatRequest):
         ))
         
         # Определяем нужен ли поиск в интернете
-        needs_search = any(keyword in chat_request.message.lower() for keyword in [
-            "новости", "news", "последние", "актуальные", "сегодня",
-            "цены", "курс", "погода", "события"
-        ])
+        message_lower = chat_request.message.lower()
+        search_keywords = [
+            # Новости и события
+            "новости", "news", "последние", "актуальные", "сегодня", "события",
+            # Цены и стоимость  
+            "цена", "цены", "стоит", "стоимость", "сколько стоит", "price", "cost",
+            # Курсы и котировки
+            "курс", "курсы", "котировки", "rate",
+            # Погода
+            "погода", "weather", "прогноз",
+            # Технологии и версии
+            "последняя версия", "latest version", "релиз", "release",
+            # Покупки
+            "купить", "где купить", "buy", "магазин",
+        ]
+        needs_search = any(keyword in message_lower for keyword in search_keywords)
         
         web_context = ""
         if needs_search and engine.tool_registry:
@@ -221,11 +233,20 @@ async def chat(request: Request, chat_request: ChatRequest):
                     "подумай", "рассуди", "логик", "think", "reason", "plan",
                     "спланируй", "стратеги", "решение проблемы"
                 ]
+                # Исследование, цены, актуальная информация
+                research_keywords = [
+                    "цена", "стоит", "стоимость", "сколько", "price", "cost",
+                    "купить", "где купить", "новости", "news", "последние",
+                    "актуальные", "курс", "погода", "версия", "release"
+                ]
                 
                 # Определяем тип по ключевым словам
                 if any(kw in message_lower for kw in code_keywords):
                     task_type = "code"
                     logger.info(f"Chat: Detected CODE task from message content")
+                elif any(kw in message_lower for kw in research_keywords):
+                    task_type = "research"  # Для цен/новостей нужен research
+                    logger.info(f"Chat: Detected RESEARCH task (price/news query)")
                 elif any(kw in message_lower for kw in analysis_keywords):
                     task_type = "analysis"
                     logger.info(f"Chat: Detected ANALYSIS task from message content")
@@ -235,14 +256,17 @@ async def chat(request: Request, chat_request: ChatRequest):
                 elif chat_request.mode == "ide":
                     task_type = "code"
                 elif chat_request.mode == "research":
-                    task_type = "analysis"
+                    task_type = "research"
                 else:
                     task_type = "chat"
                 
                 complexity_level = complexity_info.level.value if complexity_info else "simple"
                 
-                # Для простых задач всегда fast, для сложных - balanced
-                if complexity_level in ["trivial", "simple"]:
+                # Research (цены, новости) всегда требует качественную модель
+                if task_type == "research":
+                    quality = "balanced"  # Для цен/новостей нужна точность
+                    logger.info("Chat: Using balanced quality for research query")
+                elif complexity_level in ["trivial", "simple"]:
                     quality = "fast"  # Быстрые модели для простых задач
                 else:
                     quality = "balanced"
