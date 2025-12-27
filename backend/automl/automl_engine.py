@@ -2,7 +2,7 @@
 AutoML Engine - Automatic model selection and training
 """
 
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 import pandas as pd
 import numpy as np
 from ..core.logger import get_logger
@@ -11,6 +11,10 @@ logger = get_logger(__name__)
 try:
     from sklearn.model_selection import train_test_split
     from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, r2_score, mean_squared_error
+    from sklearn.preprocessing import LabelEncoder, OneHotEncoder
+    from sklearn.compose import ColumnTransformer
+    from sklearn.pipeline import Pipeline
+    from sklearn.impute import SimpleImputer
     import xgboost as xgb
     import lightgbm as lgb
     from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
@@ -41,6 +45,103 @@ class AutoMLEngine:
         
         self.model_trainer = ModelTrainer(config)
         self.hyperparameter_optimizer = HyperparameterOptimizer(config) if self.optimization_enabled else None
+        
+        # Preprocessing settings
+        self.max_categorical_cardinality = self.config.get("max_categorical_cardinality", 50)
+        self.handle_missing = self.config.get("handle_missing", True)
+    
+    def _preprocess_data(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        task_type: str,
+    ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+        """
+        Preprocess data: handle categorical variables, missing values, and encode target.
+        
+        Args:
+            X: Feature DataFrame
+            y: Target Series
+            task_type: 'classification' or 'regression'
+            
+        Returns:
+            Tuple of (X_processed, y_processed, preprocessing_info)
+        """
+        preprocessing_info = {
+            "categorical_columns": [],
+            "numeric_columns": [],
+            "dropped_columns": [],
+            "target_encoder": None,
+        }
+        
+        # Identify column types
+        categorical_cols = []
+        numeric_cols = []
+        dropped_cols = []
+        
+        for col in X.columns:
+            if X[col].dtype == 'object' or X[col].dtype.name == 'category':
+                # Check cardinality
+                cardinality = X[col].nunique()
+                if cardinality <= self.max_categorical_cardinality:
+                    categorical_cols.append(col)
+                else:
+                    dropped_cols.append(col)
+                    logger.warning(
+                        f"Dropping column '{col}' - cardinality {cardinality} > {self.max_categorical_cardinality}"
+                    )
+            elif np.issubdtype(X[col].dtype, np.number):
+                numeric_cols.append(col)
+            else:
+                dropped_cols.append(col)
+                logger.warning(f"Dropping column '{col}' - unsupported dtype {X[col].dtype}")
+        
+        preprocessing_info["categorical_columns"] = categorical_cols
+        preprocessing_info["numeric_columns"] = numeric_cols
+        preprocessing_info["dropped_columns"] = dropped_cols
+        
+        # Drop high-cardinality/unsupported columns
+        X = X.drop(columns=dropped_cols, errors='ignore')
+        
+        # Build preprocessor
+        transformers = []
+        
+        if numeric_cols:
+            numeric_transformer = Pipeline(steps=[
+                ('imputer', SimpleImputer(strategy='median')),
+            ])
+            transformers.append(('num', numeric_transformer, numeric_cols))
+        
+        if categorical_cols:
+            categorical_transformer = Pipeline(steps=[
+                ('imputer', SimpleImputer(strategy='constant', fill_value='_missing_')),
+                ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False)),
+            ])
+            transformers.append(('cat', categorical_transformer, categorical_cols))
+        
+        if transformers:
+            preprocessor = ColumnTransformer(transformers=transformers, remainder='drop')
+            X_processed = preprocessor.fit_transform(X)
+            preprocessing_info["preprocessor"] = preprocessor
+        else:
+            X_processed = X.values
+        
+        # Encode target for classification
+        y_processed = y.copy()
+        if task_type == "classification" and y.dtype == 'object':
+            label_encoder = LabelEncoder()
+            y_processed = label_encoder.fit_transform(y)
+            preprocessing_info["target_encoder"] = label_encoder
+            preprocessing_info["target_classes"] = list(label_encoder.classes_)
+        else:
+            y_processed = y.values
+        
+        logger.info(
+            f"Preprocessing: {len(numeric_cols)} numeric, {len(categorical_cols)} categorical, "
+            f"{len(dropped_cols)} dropped columns"
+        )
+        
+        return X_processed, y_processed, preprocessing_info
     
     async def auto_train(
         self,
@@ -68,6 +169,10 @@ class AutoMLEngine:
             # Load data
             df = pd.read_csv(data_path)
             
+            # Validate target column
+            if target_column not in df.columns:
+                return {"success": False, "error": f"Target column '{target_column}' not found in data"}
+            
             # Prepare features and target
             X = df.drop(columns=[target_column])
             y = df[target_column]
@@ -79,9 +184,15 @@ class AutoMLEngine:
                 else:
                     task_type = "regression"
             
+            # Preprocess data (handle categorical variables, missing values, etc.)
+            X_processed, y_processed, preprocessing_info = self._preprocess_data(X, y, task_type)
+            
+            if X_processed.shape[1] == 0:
+                return {"success": False, "error": "No valid features after preprocessing"}
+            
             # Split data
             X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=test_size, random_state=42
+                X_processed, y_processed, test_size=test_size, random_state=42
             )
             
             # Try different models
@@ -145,7 +256,14 @@ class AutoMLEngine:
                 "best_model": best_model,
                 "all_results": results,
                 "training_samples": len(X_train),
-                "test_samples": len(X_test)
+                "test_samples": len(X_test),
+                "preprocessing": {
+                    "categorical_columns": preprocessing_info.get("categorical_columns", []),
+                    "numeric_columns": preprocessing_info.get("numeric_columns", []),
+                    "dropped_columns": preprocessing_info.get("dropped_columns", []),
+                    "target_classes": preprocessing_info.get("target_classes"),
+                    "feature_count": X_processed.shape[1],
+                },
             }
             
         except Exception as e:

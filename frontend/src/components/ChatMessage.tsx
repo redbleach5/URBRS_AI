@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, memo } from 'react';
 import { 
   CircleCheck, CircleX, Brain, Search, RefreshCw, Zap, 
   AlertTriangle, Lightbulb, Clock, Bot, FileText, ThumbsUp, ThumbsDown
@@ -21,7 +21,7 @@ interface ThinkingTraceProps {
   thinking: string;
 }
 
-const ThinkingTrace: React.FC<ThinkingTraceProps> = ({ thinking }) => (
+const ThinkingTrace: React.FC<ThinkingTraceProps> = memo(({ thinking }) => (
   <div className="mb-4 p-4 bg-gradient-to-br from-purple-900/30 to-purple-800/20 border border-purple-500/40 rounded-xl shadow-lg">
     <div className="flex items-center justify-between mb-3">
       <div className="flex items-center gap-2">
@@ -35,14 +35,16 @@ const ThinkingTrace: React.FC<ThinkingTraceProps> = ({ thinking }) => (
       {thinking}
     </div>
   </div>
-);
+));
+
+ThinkingTrace.displayName = 'ThinkingTrace';
 
 interface ReflectionPanelProps {
   reflection: MessageReflection;
   metadata?: MessageMetadata;
 }
 
-const ReflectionPanel: React.FC<ReflectionPanelProps> = ({ reflection, metadata }) => (
+const ReflectionPanel: React.FC<ReflectionPanelProps> = memo(({ reflection, metadata }) => (
   <div className="mb-4 p-4 bg-gradient-to-br from-emerald-900/30 to-teal-800/20 border border-emerald-500/40 rounded-xl shadow-lg">
     <div className="flex items-center justify-between mb-3">
       <div className="flex items-center gap-2">
@@ -177,13 +179,15 @@ const ReflectionPanel: React.FC<ReflectionPanelProps> = ({ reflection, metadata 
       </div>
     )}
   </div>
-);
+));
+
+ReflectionPanel.displayName = 'ReflectionPanel';
 
 interface ProviderInfoProps {
   metadata: NonNullable<MessageMetadata>;
 }
 
-const ProviderInfo: React.FC<ProviderInfoProps> = ({ metadata }) => (
+const ProviderInfo: React.FC<ProviderInfoProps> = memo(({ metadata }) => (
   <div className="mb-3 -mt-1 flex items-center gap-2 flex-wrap">
     {metadata?.provider && (
       <span className="px-2.5 py-1 bg-[#0f111b]/60 backdrop-blur-sm border border-[#2a2f46] rounded-lg text-xs font-medium text-gray-300 flex items-center gap-1.5">
@@ -221,14 +225,16 @@ const ProviderInfo: React.FC<ProviderInfoProps> = ({ metadata }) => (
       </span>
     )}
   </div>
-);
+));
+
+ProviderInfo.displayName = 'ProviderInfo';
 
 interface FilesListProps {
   files: any[];
   onDownloadCode: (code: string, filename: string) => void;
 }
 
-const FilesList: React.FC<FilesListProps> = ({ files, onDownloadCode }) => (
+const FilesList: React.FC<FilesListProps> = memo(({ files, onDownloadCode }) => (
   <div className="mt-3">
     <div className="text-sm font-semibold mb-3 text-gray-200 flex items-center gap-2">
       <FileText size={14} strokeWidth={1.5} className="text-gray-400" />
@@ -254,7 +260,9 @@ const FilesList: React.FC<FilesListProps> = ({ files, onDownloadCode }) => (
       ))}
     </div>
   </div>
-);
+));
+
+FilesList.displayName = 'FilesList';
 
 // ============ Feedback Component ============
 
@@ -349,7 +357,7 @@ interface ChatMessageComponentProps {
   onFeedbackSubmit?: (messageId: string, feedback: FeedbackData) => void;
 }
 
-export const ChatMessage: React.FC<ChatMessageComponentProps> = ({
+export const ChatMessage: React.FC<ChatMessageComponentProps> = memo(({
   message,
   index,
   runningCodeId,
@@ -385,13 +393,24 @@ export const ChatMessage: React.FC<ChatMessageComponentProps> = ({
         ) : (
           <div>
             {message.status === 'streaming' && (
-              <div className="flex items-center gap-3 text-gray-300">
-                <div className="flex gap-1">
-                  <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
-                  <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
-                  <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center gap-3 text-gray-300">
+                  <div className="relative w-8 h-8">
+                    <div className="absolute inset-0 rounded-full bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 animate-spin" style={{ animationDuration: '2s' }}></div>
+                    <div className="absolute inset-1 rounded-full bg-[#1a1d2e]"></div>
+                    <div className="absolute inset-2 rounded-full bg-gradient-to-r from-blue-400 to-purple-400 animate-pulse"></div>
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="text-sm font-medium text-gray-200">Обрабатываю запрос...</span>
+                    <span className="text-xs text-gray-500">Это может занять несколько секунд</span>
+                  </div>
                 </div>
-                <span className="text-sm font-medium">Выполняется...</span>
+                {/* Animated shimmer effect */}
+                <div className="space-y-2">
+                  <div className="h-4 bg-gradient-to-r from-[#1f2236] via-[#2a2f46] to-[#1f2236] rounded animate-shimmer bg-[length:200%_100%]"></div>
+                  <div className="h-4 w-3/4 bg-gradient-to-r from-[#1f2236] via-[#2a2f46] to-[#1f2236] rounded animate-shimmer bg-[length:200%_100%]" style={{ animationDelay: '0.15s' }}></div>
+                  <div className="h-4 w-1/2 bg-gradient-to-r from-[#1f2236] via-[#2a2f46] to-[#1f2236] rounded animate-shimmer bg-[length:200%_100%]" style={{ animationDelay: '0.3s' }}></div>
+                </div>
               </div>
             )}
             
@@ -479,7 +498,9 @@ export const ChatMessage: React.FC<ChatMessageComponentProps> = ({
       )}
     </div>
   );
-};
+});
+
+ChatMessage.displayName = 'ChatMessage';
 
 export default ChatMessage;
 

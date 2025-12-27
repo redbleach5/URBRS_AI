@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { TIMEOUT_CONFIG } from '../config/timeouts';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1';
 
@@ -7,7 +8,7 @@ const client = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
-  timeout: 600000, // shared default timeout for long tasks
+  timeout: TIMEOUT_CONFIG.TASK_EXECUTION, // default timeout for long tasks
 });
 
 client.interceptors.response.use(
@@ -70,7 +71,7 @@ export async function executeTask(request: TaskRequest, signal?: AbortSignal) {
   try {
     const response = await client.post('/tasks/execute', request, {
       signal,
-      timeout: 600000, // 10 minutes for complex tasks
+      timeout: TIMEOUT_CONFIG.TASK_EXECUTION,
     });
     return response.data;
   } catch (error: any) {
@@ -85,7 +86,7 @@ export async function sendChat(request: ChatRequest, signal?: AbortSignal): Prom
   try {
     const response = await client.post('/chat', request, {
       signal,
-      timeout: 120000, // 2 minutes for chat
+      timeout: TIMEOUT_CONFIG.CHAT,
     });
     return response.data;
   } catch (error: any) {
@@ -100,7 +101,7 @@ export async function sendChat(request: ChatRequest, signal?: AbortSignal): Prom
 export async function getStatus() {
   try {
     const response = await client.get('/tasks/status', {
-      timeout: 5000, // 5 seconds timeout for status check
+      timeout: TIMEOUT_CONFIG.STATUS_CHECK,
     });
     return response.data;
   } catch (error: any) {
@@ -199,6 +200,48 @@ export async function indexProject(request: { project_path: string }) {
   return response.data;
 }
 
+// File operations
+export interface FileWriteRequest {
+  file_path: string;
+  content: string;
+  create_dirs?: boolean;
+}
+
+export interface FileWriteResponse {
+  success: boolean;
+  path: string;
+  name: string;
+  size: number;
+  lines: number;
+}
+
+export async function writeFile(request: FileWriteRequest): Promise<FileWriteResponse> {
+  const response = await client.post('/project/write-file', request);
+  return response.data;
+}
+
+export async function createFile(request: FileWriteRequest): Promise<FileWriteResponse> {
+  const response = await client.post('/project/create-file', request);
+  return response.data;
+}
+
+export async function deleteFile(file_path: string): Promise<{ success: boolean; deleted: string }> {
+  const response = await client.delete('/project/delete-file', { 
+    data: { file_path } 
+  });
+  return response.data;
+}
+
+export async function renameFile(old_path: string, new_path: string): Promise<{
+  success: boolean;
+  old_path: string;
+  new_path: string;
+  name: string;
+}> {
+  const response = await client.post('/project/rename-file', { old_path, new_path });
+  return response.data;
+}
+
 export async function getMetricsStats() {
   const response = await client.get('/metrics/stats');
   return response.data;
@@ -242,7 +285,7 @@ export async function updateConfig(config: any): Promise<any> {
 export async function checkAvailability(): Promise<any> {
   try {
     const response = await client.get('/monitoring/check-availability', {
-      timeout: 10000, // 10 seconds timeout for availability check
+      timeout: TIMEOUT_CONFIG.AVAILABILITY_CHECK,
     });
     return response.data;
   } catch (error: any) {
@@ -272,7 +315,7 @@ export async function checkAvailability(): Promise<any> {
 export async function checkOllamaServer(): Promise<any> {
   try {
     const response = await client.get('/monitoring/ollama/check', {
-      timeout: 10000, // 10 seconds timeout for Ollama check
+      timeout: TIMEOUT_CONFIG.OLLAMA_CHECK,
     });
     return response.data;
   } catch (error: any) {
@@ -342,7 +385,7 @@ export interface ModelSelectResponse {
 
 export async function getAvailableModels(): Promise<ModelsResponse> {
   try {
-    const response = await client.get('/models', { timeout: 15000 });
+    const response = await client.get('/models', { timeout: TIMEOUT_CONFIG.MODELS_LIST });
     return response.data;
   } catch (error: any) {
     return {
@@ -380,7 +423,7 @@ export async function getRecommendedModel(
     if (complexity) params.append('complexity', complexity);
     if (speedPriority) params.append('speed_priority', 'true');
     
-    const response = await client.get(`/models/recommend?${params.toString()}`, { timeout: 10000 });
+    const response = await client.get(`/models/recommend?${params.toString()}`, { timeout: TIMEOUT_CONFIG.AVAILABILITY_CHECK });
     return response.data;
   } catch (error: any) {
     return {
@@ -394,7 +437,7 @@ export async function getRecommendedModel(
 // Learning & Feedback API
 export async function getFeedbackStats(): Promise<any> {
   try {
-    const response = await client.get('/feedback/stats', { timeout: 10000 });
+    const response = await client.get('/feedback/stats', { timeout: TIMEOUT_CONFIG.QUICK_REQUEST });
     return response.data;
   } catch (error: any) {
     return {
@@ -409,7 +452,7 @@ export async function getFeedbackStats(): Promise<any> {
 
 export async function getFeedbackRecommendations(): Promise<any> {
   try {
-    const response = await client.get('/feedback/recommendations', { timeout: 10000 });
+    const response = await client.get('/feedback/recommendations', { timeout: TIMEOUT_CONFIG.QUICK_REQUEST });
     return response.data;
   } catch (error: any) {
     return {

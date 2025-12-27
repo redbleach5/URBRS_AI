@@ -42,6 +42,13 @@ class FileReadRequest(BaseModel):
     file_path: str = Field(..., description="Путь к файлу")
 
 
+class FileWriteRequest(BaseModel):
+    """Запрос на запись файла"""
+    file_path: str = Field(..., description="Путь к файлу")
+    content: str = Field(..., description="Содержимое файла")
+    create_dirs: bool = Field(default=True, description="Создавать родительские директории")
+
+
 class ProjectAnalysisRequest(BaseModel):
     """Запрос на анализ проекта"""
     project_path: str = Field(..., description="Путь к проекту")
@@ -357,6 +364,135 @@ async def read_file(request: FileReadRequest, req: Request) -> Dict[str, Any]:
     }
 
 
+@router.post("/project/write-file")
+async def write_file(request: FileWriteRequest) -> Dict[str, Any]:
+    """
+    Записать содержимое в файл.
+    """
+    file_path = Path(request.file_path).expanduser().resolve()
+    
+    # Проверяем, не пытается ли пользователь записать в системные директории
+    forbidden_paths = ['/etc', '/usr', '/bin', '/sbin', '/var', '/System', '/Library']
+    for forbidden in forbidden_paths:
+        if str(file_path).startswith(forbidden):
+            raise HTTPException(status_code=403, detail=f"Запись в {forbidden} запрещена")
+    
+    try:
+        # Создаём родительские директории если нужно
+        if request.create_dirs:
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Проверяем что родительская директория существует
+        if not file_path.parent.exists():
+            raise HTTPException(status_code=404, detail="Родительская директория не существует")
+        
+        # Записываем файл
+        file_path.write_text(request.content, encoding='utf-8')
+        
+        logger.info(f"File saved: {file_path}")
+        
+        return {
+            "success": True,
+            "path": str(file_path),
+            "name": file_path.name,
+            "size": len(request.content),
+            "lines": request.content.count('\n') + 1
+        }
+        
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Нет прав на запись в файл")
+    except OSError as e:
+        logger.error(f"Error writing file: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/project/create-file")
+async def create_file(request: FileWriteRequest) -> Dict[str, Any]:
+    """
+    Создать новый файл в проекте.
+    """
+    file_path = Path(request.file_path).expanduser().resolve()
+    
+    if file_path.exists():
+        raise HTTPException(status_code=409, detail="Файл уже существует")
+    
+    return await write_file(request)
+
+
+@router.delete("/project/delete-file")
+async def delete_file(request: FileReadRequest) -> Dict[str, Any]:
+    """
+    Удалить файл из проекта.
+    """
+    file_path = Path(request.file_path).expanduser().resolve()
+    
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Файл не найден")
+    
+    if not file_path.is_file():
+        raise HTTPException(status_code=400, detail="Это не файл")
+    
+    # Проверяем запрещённые пути
+    forbidden_paths = ['/etc', '/usr', '/bin', '/sbin', '/var', '/System', '/Library']
+    for forbidden in forbidden_paths:
+        if str(file_path).startswith(forbidden):
+            raise HTTPException(status_code=403, detail=f"Удаление из {forbidden} запрещено")
+    
+    try:
+        file_path.unlink()
+        logger.info(f"File deleted: {file_path}")
+        
+        return {
+            "success": True,
+            "deleted": str(file_path)
+        }
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Нет прав на удаление файла")
+    except OSError as e:
+        logger.error(f"Error deleting file: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class FileRenameRequest(BaseModel):
+    """Запрос на переименование файла"""
+    old_path: str = Field(..., description="Текущий путь к файлу")
+    new_path: str = Field(..., description="Новый путь к файлу")
+
+
+@router.post("/project/rename-file")
+async def rename_file(request: FileRenameRequest) -> Dict[str, Any]:
+    """
+    Переименовать или переместить файл.
+    """
+    old_path = Path(request.old_path).expanduser().resolve()
+    new_path = Path(request.new_path).expanduser().resolve()
+    
+    if not old_path.exists():
+        raise HTTPException(status_code=404, detail="Исходный файл не найден")
+    
+    if new_path.exists():
+        raise HTTPException(status_code=409, detail="Файл с таким именем уже существует")
+    
+    try:
+        # Создаём родительскую директорию если нужно
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        old_path.rename(new_path)
+        logger.info(f"File renamed: {old_path} -> {new_path}")
+        
+        return {
+            "success": True,
+            "old_path": str(old_path),
+            "new_path": str(new_path),
+            "name": new_path.name
+        }
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Нет прав на переименование")
+    except OSError as e:
+        logger.error(f"Error renaming file: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/project/analyze")
 async def analyze_project(request: ProjectAnalysisRequest, req: Request) -> Dict[str, Any]:
     """
@@ -479,14 +615,37 @@ async def analyze_project_stream(request: ProjectAnalysisRequest, req: Request):
             if context.get("rag_context"):
                 yield _sse_event("rag", "🔍 Поиск в базе знаний...", 0.5)
             
+            # Получаем информацию о модели с учётом сложности проекта
+            model_info = {"provider": None, "model": None, "reason": "Неизвестно"}
+            if engine.llm_manager:
+                model_info = engine.llm_manager.get_active_model_info(
+                    complexity=profile.complexity.value,
+                    code_files=profile.code_files,
+                    total_lines=profile.total_lines
+                )
+            
+            # Определяем причину выбора модели на основе метрик проекта
+            model_selection_reason = _get_model_selection_explanation(
+                profile.code_files, 
+                profile.total_lines, 
+                profile.complexity.value,
+                model_info
+            )
+            
             # Анализ
+            selected_model = model_info.get("model")
             yield _sse_event("analyzing", "🧠 AI анализирует проект...", 0.55, {
-                "info": "Это может занять 1-2 минуты"
+                "info": f"Модель {selected_model} анализирует проект...",
+                "model": selected_model,
+                "provider": model_info.get("provider"),
+                "model_reason": model_selection_reason,
+                "available_models": model_info.get("available_models", [])[:5]  # Показываем топ-5
             })
             
-            # Запускаем анализ
+            # Запускаем анализ с выбранной моделью
             analysis_results = await analyzer._run_analysis(
-                profile, context, strategy, request.specific_question
+                profile, context, strategy, request.specific_question,
+                preferred_model=selected_model
             )
             
             yield _sse_event("processing", "📝 Обрабатываем результаты...", 0.9)
@@ -507,7 +666,13 @@ async def analyze_project_stream(request: ProjectAnalysisRequest, req: Request):
                 "strategy_used": strategy['name'],
                 "files_analyzed": files_count,
                 "total_lines": profile.total_lines,
-                "analysis": analysis_results.get("final_answer") or analysis_results.get("analysis"),
+                "model_info": {
+                    "model": model_info.get("model"),
+                    "provider": model_info.get("provider"),
+                    "is_local": model_info.get("is_local", False),
+                    "reason": model_selection_reason
+                },
+                "analysis": analysis_results.get("final_answer") or analysis_results.get("analysis") or analysis_results.get("report"),
                 "result": analysis_results
             }
             
@@ -529,6 +694,39 @@ async def analyze_project_stream(request: ProjectAnalysisRequest, req: Request):
             "X-Accel-Buffering": "no"
         }
     )
+
+
+def _get_model_selection_explanation(
+    code_files: int, 
+    total_lines: int, 
+    complexity: str,
+    model_info: Dict[str, any]
+) -> str:
+    """
+    Объясняет почему выбрана данная модель на основе метрик проекта.
+    """
+    model_name = model_info.get("model") or "неизвестная модель"
+    provider = model_info.get("provider") or "неизвестный провайдер"
+    is_local = model_info.get("is_local", False)
+    
+    # Формируем объяснение
+    parts = []
+    
+    # Причина по сложности
+    if complexity == "complex":
+        parts.append(f"Проект сложный ({code_files} файлов, {total_lines:,} строк)")
+    elif complexity == "medium":
+        parts.append(f"Проект средней сложности ({code_files} файлов, {total_lines:,} строк)")
+    else:
+        parts.append(f"Проект простой ({code_files} файлов, {total_lines:,} строк)")
+    
+    # Причина по провайдеру
+    if is_local:
+        parts.append("→ используется локальная модель для скорости и приватности")
+    else:
+        parts.append("→ используется облачная модель для лучшего качества")
+    
+    return " ".join(parts)
 
 
 def _sse_event(stage: str, message: str, progress: float, details: Optional[Dict] = None) -> str:

@@ -1,7 +1,20 @@
 import React from 'react';
+import DOMPurify from 'dompurify';
+
+// Configure DOMPurify to allow safe HTML elements
+DOMPurify.setConfig({
+  ALLOWED_TAGS: [
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'br', 'hr',
+    'ul', 'ol', 'li', 'a', 'strong', 'em', 'code', 'pre',
+    'blockquote', 'div', 'span', 'table', 'thead', 'tbody',
+    'tr', 'th', 'td', 'img'
+  ],
+  ALLOWED_ATTR: ['href', 'target', 'rel', 'class', 'style', 'src', 'alt', 'title'],
+  ALLOW_DATA_ATTR: false,
+});
 
 /**
- * Renders markdown text to HTML with styling
+ * Renders markdown text to HTML with styling and sanitization
  */
 export function renderMarkdown(text: string): string {
   if (!text) return '';
@@ -109,7 +122,8 @@ export function renderMarkdown(text: string): string {
     html = html.replace(`CODE_BLOCK_${index}`, block);
   });
   
-  return html;
+  // Sanitize the final HTML to prevent XSS attacks
+  return DOMPurify.sanitize(html);
 }
 
 interface MarkdownContentProps {

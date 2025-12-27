@@ -3,13 +3,105 @@ Safety Guard - Validates commands and paths for security
 """
 
 import re
+import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict
 from urllib.parse import urlparse
+from collections import defaultdict
 from ..core.logger import get_logger
 logger = get_logger(__name__)
 
 from ..core.exceptions import SafetyException
+
+
+class URLRateLimiter:
+    """
+    Rate limiter специально для URL запросов.
+    Защищает от DDoS и злоупотреблений API.
+    """
+    
+    def __init__(
+        self,
+        requests_per_minute: int = 30,
+        requests_per_hour: int = 300,
+        burst_limit: int = 10,  # Максимум запросов за 5 сек
+    ):
+        self.requests_per_minute = requests_per_minute
+        self.requests_per_hour = requests_per_hour
+        self.burst_limit = burst_limit
+        
+        # {domain: [timestamps]}
+        self._requests: Dict[str, list] = defaultdict(list)
+        self._last_cleanup = time.time()
+    
+    def _cleanup(self):
+        """Очистка старых записей"""
+        now = time.time()
+        if now - self._last_cleanup < 60:
+            return
+        
+        cutoff = now - 3600  # 1 час
+        for domain in list(self._requests.keys()):
+            self._requests[domain] = [t for t in self._requests[domain] if t > cutoff]
+            if not self._requests[domain]:
+                del self._requests[domain]
+        self._last_cleanup = now
+    
+    def check_and_record(self, url: str) -> tuple:
+        """
+        Проверяет rate limit и записывает запрос.
+        
+        Returns:
+            (allowed: bool, error_message: str or None)
+        """
+        self._cleanup()
+        
+        try:
+            parsed = urlparse(url)
+            domain = parsed.hostname or "unknown"
+        except Exception:
+            domain = "unknown"
+        
+        now = time.time()
+        requests = self._requests[domain]
+        
+        # Очищаем старые для этого домена
+        requests = [t for t in requests if t > now - 3600]
+        
+        # Проверка burst (5 сек)
+        recent_burst = len([t for t in requests if t > now - 5])
+        if recent_burst >= self.burst_limit:
+            return False, f"Burst limit exceeded for {domain}: {self.burst_limit} requests per 5 sec"
+        
+        # Проверка минутного лимита
+        recent_minute = len([t for t in requests if t > now - 60])
+        if recent_minute >= self.requests_per_minute:
+            return False, f"Rate limit exceeded for {domain}: {self.requests_per_minute}/min"
+        
+        # Проверка часового лимита
+        if len(requests) >= self.requests_per_hour:
+            return False, f"Rate limit exceeded for {domain}: {self.requests_per_hour}/hour"
+        
+        # Разрешено - записываем
+        requests.append(now)
+        self._requests[domain] = requests
+        return True, None
+    
+    def get_stats(self, domain: str = None) -> Dict:
+        """Возвращает статистику запросов"""
+        now = time.time()
+        if domain:
+            requests = self._requests.get(domain, [])
+            return {
+                "domain": domain,
+                "last_minute": len([t for t in requests if t > now - 60]),
+                "last_hour": len(requests),
+            }
+        
+        return {
+            "total_domains": len(self._requests),
+            "total_requests_hour": sum(len(v) for v in self._requests.values()),
+        }
 
 
 class SafetyGuard:
@@ -64,6 +156,14 @@ class SafetyGuard:
             re.compile(pattern, re.IGNORECASE)
             for pattern in valid_patterns + self.default_blocked_patterns
         ]
+        
+        # URL Rate Limiter
+        rate_limit_config = config.get("rate_limit", {}) if isinstance(config, dict) else getattr(config, "rate_limit", {}) or {}
+        self._url_rate_limiter = URLRateLimiter(
+            requests_per_minute=rate_limit_config.get("requests_per_minute", 30),
+            requests_per_hour=rate_limit_config.get("requests_per_hour", 300),
+            burst_limit=rate_limit_config.get("burst_limit", 10),
+        )
     
     def validate_command(self, command: str) -> bool:
         """
@@ -136,18 +236,19 @@ class SafetyGuard:
             logger.error(f"Path validation error: {e}")
             raise SafetyException(f"Invalid path: {e}") from e
     
-    def validate_url(self, url: str) -> bool:
+    def validate_url(self, url: str, check_rate_limit: bool = True) -> bool:
         """
-        Validate URL for SSRF protection
+        Validate URL for SSRF protection and rate limiting
         
         Args:
             url: URL to validate
+            check_rate_limit: Whether to check and record rate limit (default True)
             
         Returns:
             True if URL is safe
             
         Raises:
-            SafetyException: If URL is dangerous
+            SafetyException: If URL is dangerous or rate limited
         """
         if not self.enabled:
             return True
@@ -173,10 +274,21 @@ class SafetyGuard:
                 logger.warning(f"Blocked non-HTTP URL: {url}")
                 raise SafetyException(f"Only HTTP/HTTPS URLs allowed, got: {parsed.scheme}")
             
+            # Rate limit check (prevents DDoS/abuse)
+            if check_rate_limit:
+                allowed, error = self._url_rate_limiter.check_and_record(url)
+                if not allowed:
+                    logger.warning(f"URL rate limited: {url[:50]}... - {error}")
+                    raise SafetyException(f"URL rate limit: {error}")
+            
             return True
         except Exception as e:
             if isinstance(e, SafetyException):
                 raise
             logger.error(f"URL validation error: {e}")
             raise SafetyException(f"Invalid URL: {e}") from e
+    
+    def get_url_rate_limit_stats(self, domain: str = None) -> Dict:
+        """Get URL rate limiting statistics"""
+        return self._url_rate_limiter.get_stats(domain)
 

@@ -5,7 +5,8 @@ Web search and API tools
 import httpx
 import re
 import asyncio
-from typing import Dict, Any, List, Optional
+import random
+from typing import Dict, Any, List, Optional, Callable, TypeVar
 from ..core.logger import get_logger
 logger = get_logger(__name__)
 
@@ -26,6 +27,65 @@ except ImportError:
     except ImportError:
         HAS_DDGS = False
         logger.warning("ddgs not installed. Install with: pip install ddgs")
+
+
+T = TypeVar('T')
+
+
+async def retry_with_backoff(
+    func: Callable[[], T],
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 30.0,
+    jitter: bool = True,
+    retryable_exceptions: tuple = (Exception,),
+) -> T:
+    """
+    Retry a function with exponential backoff.
+    
+    Args:
+        func: Async or sync function to retry
+        max_retries: Maximum number of retries
+        base_delay: Initial delay in seconds
+        max_delay: Maximum delay in seconds
+        jitter: Add random jitter to delay
+        retryable_exceptions: Exceptions that trigger retry
+        
+    Returns:
+        Function result
+        
+    Raises:
+        Last exception if all retries fail
+    """
+    last_error = None
+    
+    for attempt in range(max_retries):
+        try:
+            if asyncio.iscoroutinefunction(func):
+                return await func()
+            else:
+                loop = asyncio.get_event_loop()
+                return await loop.run_in_executor(None, func)
+        except retryable_exceptions as e:
+            last_error = e
+            
+            if attempt < max_retries - 1:
+                # Exponential backoff: delay = base_delay * 2^attempt
+                delay = min(base_delay * (2 ** attempt), max_delay)
+                
+                # Add jitter (±25%)
+                if jitter:
+                    delay *= (0.75 + random.random() * 0.5)
+                
+                logger.warning(
+                    f"Attempt {attempt + 1}/{max_retries} failed: {e}. "
+                    f"Retrying in {delay:.1f}s..."
+                )
+                await asyncio.sleep(delay)
+            else:
+                logger.error(f"All {max_retries} attempts failed. Last error: {e}")
+    
+    raise last_error
 
 
 class WebSearchTool(BaseTool):
@@ -98,6 +158,7 @@ class WebSearchTool(BaseTool):
     async def _search_with_ddgs(self, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
         """
         Search using duckduckgo-search library (recommended method)
+        Uses exponential backoff for transient errors.
         
         Args:
             query: Search query
@@ -109,27 +170,40 @@ class WebSearchTool(BaseTool):
         if not HAS_DDGS:
             return []
         
-        try:
-            # Check if query contains technical/price terms
-            tech_keywords = ['rtx', 'gtx', 'nvidia', 'amd', 'intel', 'cpu', 'gpu', 'ram', 'ddr', 'ssd', 'price', 'цена', 'стоит', 'стоимость']
-            is_tech_query = any(kw in query.lower() for kw in tech_keywords)
-            
-            # For tech queries, try English search first for better results
-            def do_search():
-                with DDGS() as ddgs:
-                    # For tech/price queries, search without region restriction first
-                    if is_tech_query:
-                        # Try international search first
-                        results = list(ddgs.text(query, max_results=max_results))
-                        if not results:
-                            # Fallback to Russian region
-                            results = list(ddgs.text(query, region='ru-ru', max_results=max_results))
-                    else:
+        # Check if query contains technical/price terms
+        tech_keywords = ['rtx', 'gtx', 'nvidia', 'amd', 'intel', 'cpu', 'gpu', 'ram', 'ddr', 'ssd', 'price', 'цена', 'стоит', 'стоимость']
+        is_tech_query = any(kw in query.lower() for kw in tech_keywords)
+        
+        # For tech queries, try English search first for better results
+        def do_search():
+            with DDGS() as ddgs:
+                # For tech/price queries, search without region restriction first
+                if is_tech_query:
+                    # Try international search first
+                    results = list(ddgs.text(query, max_results=max_results))
+                    if not results:
+                        # Fallback to Russian region
                         results = list(ddgs.text(query, region='ru-ru', max_results=max_results))
-                    return results
-            
-            loop = asyncio.get_event_loop()
-            raw_results = await loop.run_in_executor(None, do_search)
+                else:
+                    results = list(ddgs.text(query, region='ru-ru', max_results=max_results))
+                return results
+        
+        try:
+            # Use retry with exponential backoff for transient errors
+            raw_results = await retry_with_backoff(
+                func=do_search,
+                max_retries=3,
+                base_delay=1.0,
+                max_delay=10.0,
+                jitter=True,
+                retryable_exceptions=(
+                    ConnectionError,
+                    TimeoutError,
+                    httpx.ConnectError,
+                    httpx.TimeoutException,
+                    Exception,  # DDGS can throw various exceptions
+                ),
+            )
             
             results = []
             for item in raw_results:
@@ -156,12 +230,13 @@ class WebSearchTool(BaseTool):
             return results
             
         except Exception as e:
-            logger.warning(f"DDGS search error: {e}")
+            logger.warning(f"DDGS search failed after retries: {e}")
             return []
     
     async def _search_duckduckgo_lite(self, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
         """
         Fallback: Search using DuckDuckGo Lite (text-only, less likely to be blocked)
+        Uses retry with backoff for network errors.
         
         Args:
             query: Search query
@@ -170,22 +245,31 @@ class WebSearchTool(BaseTool):
         Returns:
             List of search results
         """
-        try:
-            # DuckDuckGo Lite endpoint (simpler, text-only)
-            url = "https://lite.duckduckgo.com/lite/"
-            
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml",
-                "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-            }
-            
-            data = {"q": query}
-            
+        # DuckDuckGo Lite endpoint (simpler, text-only)
+        url = "https://lite.duckduckgo.com/lite/"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+        }
+        
+        data = {"q": query}
+        
+        async def do_request():
             response = await self.client.post(url, data=data, headers=headers)
             response.raise_for_status()
+            return response.text
+        
+        try:
+            html = await retry_with_backoff(
+                func=do_request,
+                max_retries=2,
+                base_delay=0.5,
+                max_delay=5.0,
+                retryable_exceptions=(httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError),
+            )
             
-            html = response.text
             results = []
             
             # Parse lite results (simpler HTML structure)
@@ -214,6 +298,7 @@ class WebSearchTool(BaseTool):
         """
         Fallback: Use DuckDuckGo Instant Answer API
         Note: This API only returns instant answers, not web results
+        Uses retry with backoff for network errors.
         
         Args:
             query: Search query
@@ -222,22 +307,31 @@ class WebSearchTool(BaseTool):
         Returns:
             List of search results
         """
-        try:
-            api_url = "https://api.duckduckgo.com/"
-            params = {
-                "q": query,
-                "format": "json",
-                "no_html": "1",
-                "skip_disambig": "1"
-            }
-            
-            headers = {
-                "User-Agent": "AILLM/1.0 (AI Assistant)"
-            }
-            
+        api_url = "https://api.duckduckgo.com/"
+        params = {
+            "q": query,
+            "format": "json",
+            "no_html": "1",
+            "skip_disambig": "1"
+        }
+        
+        headers = {
+            "User-Agent": "AILLM/1.0 (AI Assistant)"
+        }
+        
+        async def do_request():
             response = await self.client.get(api_url, params=params, headers=headers)
             response.raise_for_status()
-            data = response.json()
+            return response.json()
+        
+        try:
+            data = await retry_with_backoff(
+                func=do_request,
+                max_retries=2,
+                base_delay=0.5,
+                max_delay=5.0,
+                retryable_exceptions=(httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError),
+            )
             
             results = []
             

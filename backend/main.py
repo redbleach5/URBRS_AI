@@ -10,12 +10,13 @@ import uvicorn
 
 from .config import get_config
 from .core.engine import IDAEngine
-from .core.logger import get_logger, configure_logging
+from .core.logger import get_logger, configure_logging, create_logging_middleware
 from .api.routers import tasks, code, tools, preview, config as config_router, monitoring, project, multimodal, metrics, batch, feedback, learning, chat, models, secret
 from .api.docs import custom_openapi
 from .core.safety_utils import setup_signal_handlers
 from .core.preview_manager import PreviewManager
 from .core.rate_limiter import RateLimitMiddleware, RateLimiter
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # Инициализируем логгер
 logger = get_logger(__name__)
@@ -110,6 +111,9 @@ if enabled:
     )
     app.add_middleware(RateLimitMiddleware, rate_limiter=rate_limiter)
     logger.info(f"Rate limiting enabled: {requests_per_minute}/min, {requests_per_hour}/hour, {requests_per_day}/day")
+
+# Logging middleware with correlation ID (добавляется последним чтобы выполнялся первым)
+app.add_middleware(BaseHTTPMiddleware, dispatch=create_logging_middleware())
 
 # Include routers
 app.include_router(tasks.router, prefix="/api/v1", tags=["tasks"])

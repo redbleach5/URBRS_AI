@@ -96,3 +96,121 @@ code {
   animation: bounce-slow 2s ease-in-out infinite;
 }
 
+/* Shimmer animation for loading skeletons */
+@keyframes shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.animate-shimmer {
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+/* Pulse glow animation */
+@keyframes pulse-glow {
+  0%, 100% {
+    box-shadow: 0 0 5px rgba(59, 130, 246, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 20px rgba(59, 130, 246, 0.6), 0 0 30px rgba(139, 92, 246, 0.4);
+  }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* Slide up animation */
+@keyframes slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-slide-up {
+  animation: slide-up 0.3s ease-out;
+}
+
+/* Scale in animation */
+@keyframes scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.animate-scale-in {
+  animation: scale-in 0.2s ease-out;
+}
+
+/* Gradient border animation */
+@keyframes gradient-rotate {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+.animate-gradient {
+  background-size: 200% 200%;
+  animation: gradient-rotate 3s ease infinite;
+}
+
+/* Typing indicator animation */
+@keyframes typing-dot {
+  0%, 60%, 100% {
+    transform: translateY(0);
+    opacity: 0.5;
+  }
+  30% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+.typing-dot {
+  animation: typing-dot 1.4s ease-in-out infinite;
+}
+
+.typing-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.typing-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+/* Focus ring styles */
+.focus-ring {
+  @apply focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:ring-offset-0;
+}
+
+/* Glass morphism effect */
+.glass {
+  @apply bg-white/5 backdrop-blur-xl border border-white/10;
+}
+
+/* Better text selection */
+::selection {
+  background: rgba(59, 130, 246, 0.3);
+  color: white;
+}
+

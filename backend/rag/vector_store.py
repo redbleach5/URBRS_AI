@@ -62,6 +62,14 @@ class VectorStore:
         self.bm25: Optional[BM25Okapi] = None
         self.documents: List[str] = []
         self._initialized = False
+        
+        # BM25 incremental update tracking
+        self._bm25_needs_rebuild = False
+        self._bm25_pending_docs: List[str] = []
+        self._bm25_rebuild_threshold = 100  # Rebuild after 100 new docs
+        
+        # Duplicate detection
+        self._document_hashes: set = set()
     
     async def initialize(self) -> None:
         """Initialize vector store"""
@@ -149,17 +157,28 @@ class VectorStore:
             self.index = None
             logger.warning("Using numpy-based storage (FAISS not available)")
     
+    def _compute_doc_hash(self, doc: str) -> str:
+        """Compute hash for duplicate detection"""
+        import hashlib
+        # Use first 1000 chars for hash (performance)
+        return hashlib.md5(doc[:1000].encode()).hexdigest()
+    
     async def add_documents(
         self,
         documents: List[str],
-        metadatas: Optional[List[Dict[str, Any]]] = None
-    ) -> None:
+        metadatas: Optional[List[Dict[str, Any]]] = None,
+        skip_duplicates: bool = True
+    ) -> Dict[str, int]:
         """
-        Add documents to vector store
+        Add documents to vector store with duplicate detection
         
         Args:
             documents: List of document texts
             metadatas: Optional list of metadata dictionaries
+            skip_duplicates: Skip documents that already exist
+            
+        Returns:
+            Dict with added/skipped counts
         """
         if not self._initialized:
             await self.initialize()
@@ -167,12 +186,35 @@ class VectorStore:
         if not self.embeddings_model:
             raise AILLMException("Embeddings model not available. Please install sentence-transformers.")
         
-        logger.info(f"Adding {len(documents)} documents to vector store...")
+        # Filter duplicates
+        unique_docs = []
+        unique_metadatas = []
+        skipped = 0
+        
+        if metadatas is None:
+            metadatas = [{}] * len(documents)
+        
+        for doc, meta in zip(documents, metadatas):
+            if skip_duplicates:
+                doc_hash = self._compute_doc_hash(doc)
+                if doc_hash in self._document_hashes:
+                    skipped += 1
+                    continue
+                self._document_hashes.add(doc_hash)
+            
+            unique_docs.append(doc)
+            unique_metadatas.append(meta)
+        
+        if not unique_docs:
+            logger.info(f"All {skipped} documents were duplicates, nothing to add")
+            return {"added": 0, "skipped": skipped}
+        
+        logger.info(f"Adding {len(unique_docs)} documents (skipped {skipped} duplicates)...")
         
         # Generate embeddings
         embeddings = self.embeddings_model.encode(
-            documents,
-            show_progress_bar=True,
+            unique_docs,
+            show_progress_bar=len(unique_docs) > 100,
             batch_size=self.config.embeddings.get("batch_size", 32)
         )
         
@@ -187,31 +229,50 @@ class VectorStore:
             self._embeddings_list.extend(embeddings)
         
         # Add metadata
-        if metadatas is None:
-            metadatas = [{}] * len(documents)
-        
-        for i, (doc, metadata) in enumerate(zip(documents, metadatas)):
+        for doc, metadata in zip(unique_docs, unique_metadatas):
             self.metadata.append({
                 "text": doc,
                 "index": len(self.metadata),
                 **metadata
             })
         
-        self.documents.extend(documents)
+        self.documents.extend(unique_docs)
         
-        # Update BM25
+        # INCREMENTAL BM25 UPDATE
+        # Track pending docs instead of rebuilding every time
+        self._bm25_pending_docs.extend(unique_docs)
+        
         if BM25_AVAILABLE:
+            # Only rebuild if we have enough pending docs or no BM25 yet
+            if self.bm25 is None or len(self._bm25_pending_docs) >= self._bm25_rebuild_threshold:
+                logger.debug(f"Rebuilding BM25 index ({len(self._bm25_pending_docs)} pending docs)")
+                tokenized_docs = [doc.split() for doc in self.documents]
+                self.bm25 = BM25Okapi(tokenized_docs)
+                self._bm25_pending_docs.clear()
+            else:
+                logger.debug(f"Deferred BM25 rebuild ({len(self._bm25_pending_docs)} pending docs)")
+        
+        logger.info(f"Added {len(unique_docs)} documents. Total: {len(self.documents)}")
+        
+        return {"added": len(unique_docs), "skipped": skipped}
+    
+    async def flush_bm25(self) -> None:
+        """Force rebuild BM25 index with all pending documents"""
+        if BM25_AVAILABLE and self._bm25_pending_docs:
+            logger.info(f"Flushing BM25 index with {len(self._bm25_pending_docs)} pending docs")
             tokenized_docs = [doc.split() for doc in self.documents]
             self.bm25 = BM25Okapi(tokenized_docs)
-        
-        logger.info(f"Added {len(documents)} documents. Total: {len(self.documents)}")
+            self._bm25_pending_docs.clear()
     
     async def search(
         self,
         query: str,
         top_k: int = 10,
         use_bm25: bool = True,
-        use_reranking: bool = False
+        use_reranking: bool = False,
+        use_mmr: bool = False,
+        mmr_lambda: float = 0.7,
+        filters: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """
         Search for similar documents
@@ -221,6 +282,9 @@ class VectorStore:
             top_k: Number of results to return
             use_bm25: Whether to use BM25 for initial filtering
             use_reranking: Whether to use reranking
+            use_mmr: Whether to use MMR for diversity
+            mmr_lambda: MMR lambda parameter (0=diversity, 1=relevance)
+            filters: Metadata filters (e.g. {"file_type": "python"})
             
         Returns:
             List of search results with metadata
@@ -230,6 +294,10 @@ class VectorStore:
         
         if not self.documents:
             return []
+        
+        # Flush pending BM25 docs before search
+        if self._bm25_pending_docs:
+            await self.flush_bm25()
         
         # Generate query embedding
         if not self.embeddings_model:
@@ -268,14 +336,23 @@ class VectorStore:
         
         # Get results
         results = []
-        for idx in combined_indices[:top_k * 2]:
+        for idx in combined_indices[:top_k * 3]:  # Get more for filtering
             if idx < len(self.metadata):
                 metadata = self.metadata[idx].copy()
                 metadata["index"] = int(idx)
+                
+                # Apply filters
+                if filters:
+                    if not self._matches_filters(metadata, filters):
+                        continue
+                
                 results.append(metadata)
         
+        # MMR for diversity (Maximal Marginal Relevance)
+        if use_mmr and len(results) > top_k:
+            results = self._mmr_rerank(query_embedding, results, mmr_lambda, top_k)
         # Reranking (if enabled)
-        if use_reranking and len(results) > top_k:
+        elif use_reranking and len(results) > top_k:
             # Reranking by combining BM25 and vector scores with token overlap
             reranked = self._rerank(query, results)
             results = reranked[:top_k]
@@ -283,6 +360,82 @@ class VectorStore:
             results = results[:top_k]
         
         return results
+    
+    def _matches_filters(self, metadata: Dict[str, Any], filters: Dict[str, Any]) -> bool:
+        """Check if metadata matches all filters"""
+        for key, value in filters.items():
+            if key not in metadata:
+                return False
+            
+            meta_value = metadata[key]
+            
+            # Support prefix matching for paths
+            if key.endswith("_prefix") and isinstance(value, str):
+                actual_key = key.replace("_prefix", "")
+                if actual_key in metadata and not str(metadata[actual_key]).startswith(value):
+                    return False
+            elif isinstance(value, list):
+                # Support IN operator
+                if meta_value not in value:
+                    return False
+            elif meta_value != value:
+                return False
+        
+        return True
+    
+    def _mmr_rerank(
+        self,
+        query_embedding: np.ndarray,
+        results: List[Dict[str, Any]],
+        lambda_param: float,
+        top_k: int
+    ) -> List[Dict[str, Any]]:
+        """
+        Maximal Marginal Relevance reranking for diversity
+        
+        Score = λ * sim(query, doc) - (1-λ) * max(sim(doc, selected_docs))
+        """
+        if not results:
+            return []
+        
+        # Get embeddings for all result documents
+        doc_texts = [r.get("text", "") for r in results]
+        doc_embeddings = self.embeddings_model.encode(doc_texts)
+        
+        # Compute relevance scores (similarity to query)
+        relevance_scores = np.dot(doc_embeddings, query_embedding)
+        
+        selected = []
+        selected_embeddings = []
+        candidates = list(range(len(results)))
+        
+        while len(selected) < top_k and candidates:
+            best_score = float('-inf')
+            best_idx = -1
+            
+            for i in candidates:
+                relevance = relevance_scores[i]
+                
+                # Compute redundancy (max similarity to already selected)
+                if selected_embeddings:
+                    similarities = np.dot(doc_embeddings[i], np.array(selected_embeddings).T)
+                    redundancy = np.max(similarities)
+                else:
+                    redundancy = 0
+                
+                # MMR score
+                mmr_score = lambda_param * relevance - (1 - lambda_param) * redundancy
+                
+                if mmr_score > best_score:
+                    best_score = mmr_score
+                    best_idx = i
+            
+            if best_idx >= 0:
+                selected.append(results[best_idx])
+                selected_embeddings.append(doc_embeddings[best_idx])
+                candidates.remove(best_idx)
+        
+        return selected
     
     def _rerank(self, query: str, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """

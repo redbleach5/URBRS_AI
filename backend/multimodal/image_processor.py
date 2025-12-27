@@ -222,12 +222,16 @@ Provide a clear, detailed description that could be used to recreate or understa
         # Fallback to OCR
         return await self.extract_text_from_image(image_path)
     
-    def _get_vision_models(self, llm_provider) -> Optional[list]:
+    def _get_vision_models(self, llm_provider, cached_models: list = None) -> Optional[list]:
         """
-        Get list of vision-capable models from provider
+        Get list of vision-capable models from provider.
+        
+        Note: This is a sync method. If you need to call async list_models(),
+        pass pre-fetched models via cached_models parameter.
         
         Args:
             llm_provider: LLM provider instance
+            cached_models: Pre-fetched list of available models (optional)
             
         Returns:
             List of vision model names, or None if not supported
@@ -255,22 +259,73 @@ Provide a clear, detailed description that could be used to recreate or understa
             'ollama': [
                 'llava',
                 'bakllava',
-                'llava:latest'
+                'llava:latest',
+                'llava-phi3',
+                'moondream',
             ]
         }
         
         # Check if provider has vision models
         if provider_name in vision_models_map:
             available_models = vision_models_map[provider_name]
+            
             # Filter to only models that are actually available
-            try:
-                all_models = llm_provider.list_models()
-                if isinstance(all_models, list):
-                    available_models = [m for m in available_models if m in all_models]
-            except Exception:
-                pass  # If we can't list models, use the default list
+            all_models = cached_models
+            if all_models is None:
+                try:
+                    # Try to get models from provider
+                    # Handle both sync and async cases
+                    list_models_method = getattr(llm_provider, 'list_models', None)
+                    if list_models_method:
+                        result = list_models_method()
+                        # Check if it's a coroutine (async method called sync)
+                        import asyncio
+                        if asyncio.iscoroutine(result):
+                            # We can't await here - log warning and use defaults
+                            logger.debug(
+                                f"list_models() is async, using default vision models for {provider_name}"
+                            )
+                            result.close()  # Close the coroutine to avoid warning
+                            all_models = None
+                        else:
+                            all_models = result
+                except Exception as e:
+                    logger.debug(f"Could not list models from {provider_name}: {e}")
+                    all_models = None
+            
+            if all_models and isinstance(all_models, list):
+                available_models = [m for m in available_models if m in all_models]
             
             return available_models if available_models else None
         
         return None
+    
+    async def get_vision_models_async(self, llm_provider) -> Optional[list]:
+        """
+        Async version to get vision-capable models from provider.
+        
+        Args:
+            llm_provider: LLM provider instance
+            
+        Returns:
+            List of vision model names, or None if not supported
+        """
+        if not llm_provider:
+            return None
+        
+        # Try to get available models asynchronously
+        cached_models = None
+        try:
+            list_models_method = getattr(llm_provider, 'list_models', None)
+            if list_models_method:
+                result = list_models_method()
+                import asyncio
+                if asyncio.iscoroutine(result):
+                    cached_models = await result
+                else:
+                    cached_models = result
+        except Exception as e:
+            logger.debug(f"Could not list models: {e}")
+        
+        return self._get_vision_models(llm_provider, cached_models)
 

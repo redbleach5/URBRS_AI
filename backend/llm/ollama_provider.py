@@ -193,6 +193,92 @@ class OllamaProvider(BaseLLMProvider):
                     logger.info(f"Auto-detected default model: '{fallback_model}'")
                 self.default_model = fallback_model
     
+    def select_model_for_complexity(self, complexity: str, code_files: int = 0, total_lines: int = 0) -> str:
+        """
+        Выбирает оптимальную модель на основе сложности задачи.
+        
+        Args:
+            complexity: "simple", "medium", "complex"
+            code_files: количество файлов кода
+            total_lines: количество строк кода
+            
+        Returns:
+            Название оптимальной модели
+        """
+        if not self._available_models:
+            return self.default_model or "llama3.2:3b"
+        
+        # Классификация моделей по размеру (параметры)
+        large_models = []  # 14B+ для сложных задач
+        medium_models = []  # 7-13B для средних задач
+        small_models = []   # <7B для простых задач
+        
+        for model in self._available_models:
+            model_lower = model.lower()
+            
+            # Определяем размер модели по имени
+            if any(x in model_lower for x in [':70b', ':32b', ':14b', ':13b', '70b', '32b', '14b', '13b']):
+                large_models.append(model)
+            elif any(x in model_lower for x in [':7b', ':8b', '7b', '8b']):
+                medium_models.append(model)
+            else:
+                small_models.append(model)
+        
+        # Определяем требуемый размер модели
+        is_complex = (
+            complexity == "complex" or 
+            code_files > 50 or 
+            total_lines > 10000
+        )
+        is_medium = (
+            complexity == "medium" or 
+            code_files > 20 or 
+            total_lines > 3000
+        )
+        
+        # Выбираем модель
+        selected = None
+        reason = ""
+        
+        if is_complex:
+            if large_models:
+                selected = large_models[0]
+                reason = f"Выбрана мощная модель для сложного проекта ({code_files} файлов, {total_lines:,} строк)"
+            elif medium_models:
+                selected = medium_models[0]
+                reason = f"Используется средняя модель (большие модели недоступны)"
+            else:
+                selected = small_models[0] if small_models else self.default_model
+                reason = "Используется доступная модель (рекомендуется установить модель 14B+)"
+        elif is_medium:
+            if medium_models:
+                selected = medium_models[0]
+                reason = f"Выбрана модель для проекта средней сложности"
+            elif large_models:
+                selected = large_models[0]
+                reason = f"Используется мощная модель для качества"
+            else:
+                selected = small_models[0] if small_models else self.default_model
+                reason = "Используется доступная модель"
+        else:
+            # Простой проект - можно использовать маленькую модель для скорости
+            if small_models:
+                selected = small_models[0]
+                reason = "Быстрая модель для простого проекта"
+            elif medium_models:
+                selected = medium_models[0]
+                reason = "Используется средняя модель"
+            else:
+                selected = large_models[0] if large_models else self.default_model
+                reason = "Используется доступная модель"
+        
+        logger.info(f"[ModelSelector] {reason}: {selected}")
+        return selected or self.default_model or "llama3.2:3b"
+    
+    def get_available_models(self) -> List[str]:
+        """Возвращает список доступных моделей"""
+        return self._available_models.copy()
+    
     async def shutdown(self) -> None:
         """Shutdown Ollama client"""
         if self.client:

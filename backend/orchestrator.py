@@ -141,9 +141,13 @@ class Orchestrator:
                 )
                 
                 # Передаём выбранную модель и сервер в контекст для агентов
+                # НО только если модель не была явно указана в context!
                 context = context or {}
-                context["preferred_model"] = adaptive_selection.model
-                context["preferred_provider"] = adaptive_selection.provider
+                if not context.get("preferred_model"):
+                    context["preferred_model"] = adaptive_selection.model
+                    context["preferred_provider"] = adaptive_selection.provider
+                else:
+                    logger.info(f"Using explicitly provided model: {context['preferred_model']}")
                 if adaptive_selection.server_url:
                     context["ollama_server_url"] = adaptive_selection.server_url
                     context["distributed_routing"] = True
@@ -181,19 +185,34 @@ class Orchestrator:
         
         # If single simple task, use LLM to select best agent
         if len(subtasks) == 1 and not agent_type:
-            # Use LLM reasoning to select the best agent (not keyword matching)
-            agent_type = await self._select_agent(task)
+            # OPTIMIZATION: If we already have task_type from routing, map it to agent
+            # This avoids an extra LLM call
+            if task_type_from_routing:
+                agent_type = self._map_task_type_to_agent(task_type_from_routing)
+                if agent_type:
+                    logger.info(f"Agent selected from routing cache: {agent_type} (task_type: {task_type_from_routing})")
+            
+            # Only call LLM if we don't have agent_type yet
+            if not agent_type:
+                agent_type = await self._select_agent(task)
         
         if agent_type:
             # Execute with specific agent
             agent = await self.agent_registry.get_agent(agent_type)
             if agent:
                 try:
+                    # Calculate adaptive timeout based on task complexity
+                    adaptive_timeout = self._calculate_adaptive_timeout(
+                        base_timeout=self.task_timeout,
+                        complexity=complexity_from_routing,
+                        task_type=task_type_from_routing
+                    )
+                    
                     # Use error handler for retry with timeout
                     try:
                         result = await asyncio.wait_for(
                             agent.execute(task, context or {}),
-                            timeout=self.task_timeout
+                            timeout=adaptive_timeout
                         )
                     except asyncio.TimeoutError:
                         # Retry with error handler
@@ -772,6 +791,77 @@ Respond with ONLY the agent name (e.g., "code_writer", "research", etc.), no exp
             "success": all(r.get("success", False) for r in results),
             "context_accumulated": not execute_parallel
         }
+    
+    def _calculate_adaptive_timeout(
+        self,
+        base_timeout: float,
+        complexity: Optional[str] = None,
+        task_type: Optional[str] = None
+    ) -> float:
+        """
+        Calculate adaptive timeout based on task complexity and type.
+        
+        Args:
+            base_timeout: Base timeout from config
+            complexity: Task complexity (low, medium, high)
+            task_type: Type of task
+            
+        Returns:
+            Adjusted timeout in seconds
+        """
+        timeout = base_timeout
+        
+        # Adjust by complexity
+        if complexity == "high":
+            timeout *= 3.0  # 3x for complex tasks
+        elif complexity == "medium":
+            timeout *= 1.5
+        
+        # Adjust by task type
+        if task_type in ["code_generation", "analysis"]:
+            timeout *= 1.5  # Code generation and analysis need more time
+        elif task_type == "simple_chat":
+            timeout = min(timeout, 30.0)  # Simple chat should be fast
+        
+        # Ensure reasonable bounds
+        timeout = max(30.0, min(timeout, 600.0))  # 30s - 10min
+        
+        logger.debug(
+            f"Adaptive timeout: {timeout:.0f}s "
+            f"(base: {base_timeout:.0f}s, complexity: {complexity}, type: {task_type})"
+        )
+        
+        return timeout
+    
+    def _map_task_type_to_agent(self, task_type: str) -> Optional[str]:
+        """
+        Maps task_type from routing to agent_type.
+        This avoids an extra LLM call when task_type is already known.
+        
+        Args:
+            task_type: Task type from TaskRouter
+            
+        Returns:
+            Agent type or None if mapping is ambiguous
+        """
+        # Direct mappings from task_type to agent
+        mappings = {
+            "code_generation": "code_writer",
+            "analysis": "research",
+            "question": "react",  # Questions can use tools
+            "reasoning": "react",
+            "simple_chat": None,  # Simple chat handled by TaskRouter directly
+            "execution_task": None,  # Ambiguous, let LLM decide
+            "data_analysis": "data_analysis",
+            "workflow": "workflow",
+            "integration": "integration",
+            "monitoring": "monitoring"
+        }
+        
+        agent = mappings.get(task_type)
+        if agent:
+            logger.debug(f"Mapped task_type '{task_type}' to agent '{agent}'")
+        return agent
     
     def _is_code_generation_task(self, task: str) -> bool:
         """

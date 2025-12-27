@@ -95,71 +95,87 @@ class IDAEngine:
             
             # Initialize LLM Provider Manager
             if self.config.llm:
-                logger.info("Initializing LLM Provider Manager...")
-                
                 self.llm_manager = LLMProviderManager(self.config.llm)
                 await self.llm_manager.initialize()
             
-            # Initialize Vector Store
+            # Initialize Vector Store (with graceful degradation)
             if self.config.rag and self.config.rag.enabled:
-                logger.info("Initializing Vector Store...")
-                self.vector_store = VectorStore(self.config.rag)
-                await self.vector_store.initialize()
+                try:
+                    self.vector_store = VectorStore(self.config.rag)
+                    await self.vector_store.initialize()
+                except Exception as e:
+                    logger.warning(f"Vector Store init failed: {e}, RAG disabled")
+                    self.vector_store = None
+                    if self.monitor:
+                        self.monitor.log_exception("vector_store", e, severity=IssueSeverity.WARNING)
             
-            # Initialize Context Manager
+            # Initialize Context Manager (with graceful degradation)
             if self.config.context:
-                logger.info("Initializing Context Manager...")
-                self.context_manager = ContextManager(
-                    self.config.context,
-                    self.vector_store,
-                    self.llm_manager
-                )
-                await self.context_manager.initialize()
+                try:
+                    self.context_manager = ContextManager(
+                        self.config.context,
+                        self.vector_store,
+                        self.llm_manager
+                    )
+                    await self.context_manager.initialize()
+                except Exception as e:
+                    logger.warning(f"Context Manager init failed: {e}")
+                    self.context_manager = None
+                    if self.monitor:
+                        self.monitor.log_exception("context_manager", e, severity=IssueSeverity.WARNING)
             
             # Initialize Safety Guard
             if self.config.tools and self.config.tools.safety:
-                logger.info("Initializing Safety Guard...")
-                # Convert Pydantic model to dict if needed
                 safety_config = pydantic_to_dict(self.config.tools.safety)
                 self.safety_guard = SafetyGuard(safety_config)
             
-            # Initialize Tool Registry
+            # Initialize Tool Registry (with graceful degradation)
             if self.config.tools and self.config.tools.enabled:
-                logger.info("Initializing Tool Registry...")
-                self.tool_registry = ToolRegistry(
-                    self.config.tools,
-                    self.safety_guard
-                )
-                await self.tool_registry.initialize()
+                try:
+                    self.tool_registry = ToolRegistry(
+                        self.config.tools,
+                        self.safety_guard
+                    )
+                    await self.tool_registry.initialize()
+                except Exception as e:
+                    logger.warning(f"Tool Registry init failed: {e}")
+                    self.tool_registry = None
+                    if self.monitor:
+                        self.monitor.log_exception("tool_registry", e, severity=IssueSeverity.WARNING)
             
             # Сохраняем raw config для передачи в компоненты (distributed routing и др.)
             self.raw_config = pydantic_to_dict(self.config) if self.config else {}
             
             # Initialize Resource Aware Selector (для распределённой маршрутизации моделей)
-            logger.info("Initializing Resource Aware Selector...")
             self.resource_aware_selector = ResourceAwareSelector(
                 llm_manager=self.llm_manager,
                 config=self.raw_config
             )
             
             # Initialize Batch Processor
-            logger.info("Initializing Batch Processor...")
             self.batch_processor = BatchProcessor(max_concurrent=5)
             
-            # Initialize Long Term Memory
+            # Initialize Long Term Memory (with graceful degradation)
             if self.config.memory and self.config.memory.enabled:
-                logger.info("Initializing Long Term Memory...")
-                # Pass vector_store to reuse embeddings model and avoid loading twice
-                self.memory = LongTermMemory(self.config.memory, vector_store=self.vector_store)
-                await self.memory.initialize()
+                try:
+                    self.memory = LongTermMemory(self.config.memory, vector_store=self.vector_store)
+                    await self.memory.initialize()
+                except Exception as e:
+                    logger.warning(f"Long Term Memory init failed: {e}")
+                    self.memory = None
+                    if self.monitor:
+                        self.monitor.log_exception("memory", e, severity=IssueSeverity.WARNING)
             
-            # Initialize Learning System for persistent agent learning
-            logger.info("Initializing Learning System...")
-            self.learning_system = await initialize_learning_system()
+            # Initialize Learning System (with graceful degradation)
+            try:
+                self.learning_system = await initialize_learning_system()
+            except Exception as e:
+                logger.warning(f"Learning System init failed: {e}")
+                self.learning_system = None
+                if self.monitor:
+                    self.monitor.log_exception("learning_system", e, severity=IssueSeverity.WARNING)
             
             # Initialize Agent Registry
-            logger.info("Initializing Agent Registry...")
-            
             self.agent_registry = AgentRegistry(
                 self.config.agents,
                 self.llm_manager,
@@ -171,13 +187,12 @@ class IDAEngine:
             
             # Initialize Orchestrator
             if self.config.orchestrator and self.config.orchestrator.enabled:
-                logger.info("Initializing Orchestrator...")
                 self.orchestrator = Orchestrator(
                     self.config.orchestrator,
                     self.agent_registry,
                     self.llm_manager,
                     self.memory,
-                    full_config=self.raw_config  # Передаём полный конфиг для distributed_mode
+                    full_config=self.raw_config
                 )
                 await self.orchestrator.initialize()
             

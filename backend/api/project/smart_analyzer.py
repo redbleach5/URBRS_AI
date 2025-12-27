@@ -138,7 +138,7 @@ class SmartProjectAnalyzer:
                     "frameworks": profile.frameworks
                 },
                 "strategy_used": strategy['name'],
-                "analysis": analysis_results.get("final_answer") or analysis_results.get("analysis"),
+                "analysis": analysis_results.get("final_answer") or analysis_results.get("analysis") or analysis_results.get("report"),
                 "insights": analysis_results.get("insights", []),
                 "recommendations": analysis_results.get("recommendations", []),
                 "files_analyzed": len(context.get("files_content", {})),
@@ -290,14 +290,16 @@ class SmartProjectAnalyzer:
             base_strategy["max_files"] = 40
             base_strategy["max_file_size"] = 2500
             base_strategy["use_multi_agent"] = True
-            base_strategy["agents"] = ["research", "code_writer"]
+            # Используем research для глубокого анализа (code_writer не подходит для анализа)
+            base_strategy["agents"] = ["research"]
             base_strategy["git_depth"] = 20
             base_strategy["rag_queries"] = 3
         else:  # LARGE
             base_strategy["max_files"] = 50
             base_strategy["max_file_size"] = 2000
             base_strategy["use_multi_agent"] = True
-            base_strategy["agents"] = ["research", "code_writer", "react"]
+            # Для очень больших проектов: research + react для пошагового анализа
+            base_strategy["agents"] = ["research", "react"]
             base_strategy["git_depth"] = 30
             base_strategy["rag_queries"] = 5
         
@@ -485,7 +487,8 @@ class SmartProjectAnalyzer:
         profile: ProjectProfile,
         context: Dict[str, Any],
         strategy: Dict[str, Any],
-        specific_question: Optional[str]
+        specific_question: Optional[str],
+        preferred_model: Optional[str] = None
     ) -> Dict[str, Any]:
         """Выполняет анализ через агентов."""
         
@@ -507,52 +510,80 @@ class SmartProjectAnalyzer:
 
 Предоставь детальный ответ на основе анализа кода."""
         else:
-            task = f"""Выполни комплексный анализ проекта.
+            task = f"""Выполни глубокий технический анализ проекта. Изучи предоставленный код и дай КОНКРЕТНЫЕ рекомендации.
 
-ПРОЕКТ: {profile.name}
-Сложность: {profile.complexity.value}
-Файлов кода: {profile.code_files}
-Строк кода: {profile.total_lines}
-Языки: {', '.join(f"{k}: {v}" for k, v in profile.languages.items())}
-Фреймворки: {', '.join(profile.frameworks) if profile.frameworks else 'Не определены'}
-Тесты: {'✅ Есть' if profile.has_tests else '❌ Нет'}
-Документация: {'✅ Есть' if profile.has_docs else '❌ Нет'}
-CI/CD: {'✅ Есть' if profile.has_ci else '❌ Нет'}
+## ПРОЕКТ: {profile.name}
+- Сложность: {profile.complexity.value}
+- Файлов кода: {profile.code_files}
+- Строк кода: {profile.total_lines}
+- Языки: {', '.join(f"{k}: {v}" for k, v in profile.languages.items())}
+- Фреймворки: {', '.join(profile.frameworks) if profile.frameworks else 'Не определены'}
+- Тесты: {'✅ Есть' if profile.has_tests else '❌ Нет'}
+- Документация: {'✅ Есть' if profile.has_docs else '❌ Нет'}
+- CI/CD: {'✅ Есть' if profile.has_ci else '❌ Нет'}
 
-КОНТЕКСТ:
+## КОД ПРОЕКТА:
 {context_text}
 
-Предоставь:
-1. **Обзор проекта** - назначение и основная функциональность
-2. **Архитектура** - структура, паттерны, зависимости
-3. **Качество кода** - сильные и слабые стороны
-4. **Рекомендации** - конкретные улучшения с примерами
-5. **Риски** - потенциальные проблемы и как их избежать
+## ТРЕБОВАНИЯ К АНАЛИЗУ:
 
-Отвечай структурированно, с конкретными примерами из кода."""
+### 1. Обзор проекта
+- Назначение и основная функциональность
+- Целевая аудитория
+
+### 2. Архитектура (с примерами из кода)
+- Структура проекта и слоёв
+- Используемые паттерны проектирования
+- Схема взаимодействия компонентов
+- Управление зависимостями
+
+### 3. Качество кода (конкретные примеры)
+**Сильные стороны:**
+- Укажи конкретные файлы и функции с хорошим кодом
+- Примеры хороших практик
+
+**Слабые стороны:**
+- Укажи конкретные проблемы с номерами строк
+- Примеры антипаттернов
+- Потенциальные баги
+
+### 4. Рекомендации (с примерами кода до/после)
+Для каждой рекомендации укажи:
+- Файл и строку, где нужно изменение
+- Код "было" → "стало"
+- Приоритет: критический/высокий/средний/низкий
+
+### 5. Риски безопасности и производительности
+- SQL-инъекции, XSS, CSRF
+- Утечки памяти, N+1 запросы
+- Небезопасное хранение секретов
+
+Отвечай на русском языке, структурированно, с КОНКРЕТНЫМИ примерами из предоставленного кода."""
         
         # Выполняем анализ
         if strategy.get("use_multi_agent") and len(strategy.get("agents", [])) > 1:
             # Мульти-агентный анализ для сложных проектов
-            return await self._multi_agent_analysis(task, strategy, context)
+            return await self._multi_agent_analysis(task, strategy, context, profile, preferred_model)
         else:
             # Одиночный агент
-            result = await self.engine.execute_task(
+            return await self.engine.execute_task(
                 task=task,
                 agent_type=strategy.get("agents", ["research"])[0],
                 context={
                     "project_path": str(profile.path),
                     "complexity": profile.complexity.value,
-                    "analysis_type": strategy.get("name", "default")
+                    "analysis_type": strategy.get("name", "default"),
+                    "preferred_model": preferred_model
                 }
             )
-            return result
     
     async def _multi_agent_analysis(
         self,
         task: str,
         strategy: Dict[str, Any],
-        context: Dict[str, Any]
+        context: Dict[str, Any],
+        profile: "ProjectProfile",
+        preferred_model: Optional[str] = None
     ) -> Dict[str, Any]:
         """Мульти-агентный анализ для сложных проектов."""
         results = {}
@@ -563,16 +594,26 @@ CI/CD: {'✅ Есть' if profile.has_ci else '❌ Нет'}
         
         for agent in agents:
             agent_task = task
-            if agent == "code_writer":
-                agent_task = f"Проанализируй код и найди возможные улучшения:\n\n{task}"
-            elif agent == "react":
-                agent_task = f"Пошагово проанализируй архитектуру и зависимости:\n\n{task}"
+            if agent == "react":
+                agent_task = f"""Выполни пошаговый глубокий анализ проекта.
+
+Используй цепочку рассуждений (Chain of Thought):
+1. Сначала изучи структуру проекта и ключевые файлы
+2. Определи архитектурные паттерны и зависимости
+3. Найди потенциальные проблемы в коде
+4. Сформулируй конкретные рекомендации с примерами
+
+{task}"""
             
             tasks.append(
                 self.engine.execute_task(
                     task=agent_task,
                     agent_type=agent,
-                    context={"analysis_mode": "multi_agent"}
+                    context={
+                        "analysis_mode": "multi_agent",
+                        "complexity": profile.complexity.value,
+                        "preferred_model": preferred_model
+                    }
                 )
             )
         
@@ -598,10 +639,28 @@ CI/CD: {'✅ Есть' if profile.has_ci else '❌ Нет'}
         
         for agent, result in results.items():
             if isinstance(result, dict):
-                if result.get("final_answer"):
-                    combined["final_answer"] += f"\n\n### Анализ от {agent}:\n{result['final_answer']}"
-                if result.get("analysis"):
-                    combined["final_answer"] += f"\n\n### Анализ от {agent}:\n{result['analysis']}"
+                # Orchestrator возвращает вложенную структуру: {result: {report: ...}}
+                # Извлекаем внутренний результат если есть
+                actual_result = result.get("result", result)
+                if isinstance(actual_result, dict):
+                    inner = actual_result
+                else:
+                    inner = result
+                
+                # Извлекаем результат из разных форматов агентов
+                content = (
+                    inner.get("final_answer") or 
+                    inner.get("analysis") or 
+                    inner.get("report") or 
+                    inner.get("code") or 
+                    result.get("final_answer") or 
+                    result.get("analysis") or 
+                    result.get("report") or 
+                    result.get("code") or 
+                    ""
+                )
+                if content:
+                    combined["final_answer"] += f"\n\n### Анализ от {agent}:\n{content}"
         
         return combined
     

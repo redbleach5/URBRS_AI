@@ -238,4 +238,63 @@ class LLMProviderManager:
     def is_provider_available(self, provider_name: str) -> bool:
         """Check if provider is available"""
         return provider_name in self.providers
+    
+    def get_active_model_info(self, complexity: str = "medium", code_files: int = 0, total_lines: int = 0) -> Dict[str, any]:
+        """
+        Get information about the currently active model and provider.
+        Selects optimal model based on task complexity.
+        
+        Args:
+            complexity: "simple", "medium", "complex"
+            code_files: number of code files
+            total_lines: total lines of code
+        
+        Returns:
+            Dict with provider, model name, and metadata
+        """
+        # Determine active provider (Ollama is priority)
+        active_provider = None
+        if "ollama" in self.providers:
+            active_provider = "ollama"
+        elif self.default_provider_name in self.providers:
+            active_provider = self.default_provider_name
+        elif self.providers:
+            active_provider = list(self.providers.keys())[0]
+        
+        if not active_provider:
+            return {
+                "provider": None,
+                "model": None,
+                "reason": "Нет доступных провайдеров"
+            }
+        
+        provider = self.providers[active_provider]
+        
+        # Smart model selection based on complexity
+        model_name = None
+        if active_provider == "ollama" and hasattr(provider, 'select_model_for_complexity'):
+            model_name = provider.select_model_for_complexity(complexity, code_files, total_lines)
+        elif hasattr(provider, 'default_model'):
+            model_name = provider.default_model
+        elif hasattr(provider, 'model'):
+            model_name = provider.model
+        
+        return {
+            "provider": active_provider,
+            "model": model_name,
+            "is_local": active_provider == "ollama",
+            "available_models": provider.get_available_models() if hasattr(provider, 'get_available_models') else [],
+            "reason": self._get_model_selection_reason(active_provider, model_name)
+        }
+    
+    def _get_model_selection_reason(self, provider: str, model: str) -> str:
+        """Generate human-readable reason for model selection."""
+        if provider == "ollama":
+            return f"Локальная модель {model or 'Ollama'} — приоритет для приватности и скорости"
+        elif provider == "openai":
+            return f"OpenAI {model or 'GPT'} — облачная модель для сложных задач"
+        elif provider == "anthropic":
+            return f"Anthropic {model or 'Claude'} — облачная модель с расширенными возможностями"
+        else:
+            return f"Модель {model or provider}"
 
