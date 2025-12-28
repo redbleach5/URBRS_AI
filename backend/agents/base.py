@@ -3,7 +3,7 @@ Base Agent class with reflection and communication capabilities
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, List, TYPE_CHECKING
+from typing import Dict, Any, Optional, List, TYPE_CHECKING, AsyncIterator
 from datetime import datetime
 from ..core.logger import get_logger
 logger = get_logger(__name__)
@@ -193,6 +193,130 @@ class BaseAgent(ABC, ReflectionMixin, UncertaintySearchMixin):
             Result dictionary
         """
         raise NotImplementedError("Subclasses must implement _execute_impl method")
+    
+    async def execute_stream(
+        self,
+        task: str,
+        context: Optional[Dict[str, Any]] = None
+    ) -> AsyncIterator[str]:
+        """
+        Execute a task with streaming output.
+        
+        Yields chunks of the response as they are generated.
+        Falls back to non-streaming if the provider doesn't support streaming.
+        
+        Args:
+            task: Task description
+            context: Additional context
+            
+        Yields:
+            String chunks of the response
+            
+        Example:
+            async for chunk in agent.execute_stream("Write a function"):
+                print(chunk, end="", flush=True)
+        """
+        if not self._initialized:
+            await self.initialize()
+        
+        ctx = context or {}
+        self._current_execution_context = ctx
+        
+        try:
+            structured_logger.log_agent_action(
+                agent_name=self.name,
+                action="execute_stream_start",
+                task=task,
+                context=ctx
+            )
+            
+            # Get system prompt and user message
+            system_prompt = self._get_streaming_system_prompt()
+            
+            messages = [
+                LLMMessage(role="system", content=system_prompt),
+                LLMMessage(role="user", content=task)
+            ]
+            
+            # Try streaming if provider supports it
+            if self.llm_manager and hasattr(self.llm_manager, 'stream'):
+                try:
+                    async for chunk in self._stream_llm_response(messages, ctx):
+                        yield chunk
+                    return
+                except NotImplementedError:
+                    pass  # Fall back to non-streaming
+                except Exception as e:
+                    logger.warning(f"Streaming failed, falling back to regular: {e}")
+            
+            # Fallback to non-streaming
+            result = await self.execute(task, context)
+            
+            # Yield the result as a single chunk
+            if "code" in result:
+                yield result["code"]
+            elif "final_answer" in result:
+                yield result["final_answer"]
+            elif "analysis" in result:
+                yield result["analysis"]
+            elif "report" in result:
+                yield result["report"]
+            else:
+                yield str(result.get("result", result))
+                
+        finally:
+            self._current_execution_context = {}
+    
+    async def _stream_llm_response(
+        self,
+        messages: List[LLMMessage],
+        context: Dict[str, Any]
+    ) -> AsyncIterator[str]:
+        """
+        Stream response from LLM provider.
+        
+        Override in subclasses for custom streaming behavior.
+        """
+        if not self.llm_manager:
+            raise AgentException("LLM manager not available")
+        
+        # Determine provider
+        provider = None
+        if self.llm_manager.is_provider_available("ollama"):
+            provider = "ollama"
+        
+        # Get the provider instance
+        provider_instance = self.llm_manager.providers.get(provider or "ollama")
+        if not provider_instance:
+            raise NotImplementedError("No streaming provider available")
+        
+        # Check if provider supports streaming
+        if not hasattr(provider_instance, 'stream'):
+            raise NotImplementedError("Provider does not support streaming")
+        
+        # Determine model
+        model = (
+            context.get("preferred_model") or
+            self._current_execution_context.get("preferred_model") or
+            self.default_model
+        )
+        
+        # Stream the response
+        async for chunk in provider_instance.stream(
+            messages=messages,
+            model=model,
+            temperature=self.temperature
+        ):
+            yield chunk
+    
+    def _get_streaming_system_prompt(self) -> str:
+        """
+        Get system prompt for streaming execution.
+        Override in subclasses for agent-specific prompts.
+        """
+        return f"""You are {self.name}, an AI assistant.
+Respond to the user's request clearly and helpfully.
+Current time: {self._get_current_datetime_info()}"""
     
     async def shutdown(self) -> None:
         """Shutdown agent"""

@@ -5,30 +5,29 @@ SmartModelSelector - Интеллектуальный выбор модели
 
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
-from enum import Enum
 from .logger import get_logger
+from .types import ComplexityLevel, ModelTier, ModelSelection as BaseModelSelection
+
 logger = get_logger(__name__)
 
 from ..llm.providers import LLMProviderManager
 from ..llm.base import LLMMessage
-
-
-class ModelTier(Enum):
-    """Уровни моделей по производительности"""
-    FAST = "fast"  # Быстрые модели для простых задач
-    BALANCED = "balanced"  # Сбалансированные модели
-    POWERFUL = "powerful"  # Мощные модели для сложных задач
+from .task_complexity_service import get_complexity_service
 
 
 @dataclass
-class ModelSelection:
-    """Результат выбора модели"""
+class SmartModelSelection:
+    """Результат выбора модели от SmartModelSelector"""
     provider: str
     model: str
     tier: ModelTier
     reason: str
     estimated_tokens: int
     estimated_time: float
+
+
+# Алиас для обратной совместимости
+ModelSelection = SmartModelSelection
 
 
 class SmartModelSelector:
@@ -50,41 +49,135 @@ class SmartModelSelector:
         self.llm_manager = llm_manager
         self.config = config or {}
         
-        # Конфигурация моделей по уровням
-        self.model_tiers = self._initialize_model_tiers()
+        # Конфигурация моделей по уровням (будет заполнена динамически)
+        self.model_tiers: Dict[ModelTier, List[Dict[str, Any]]] = {
+            ModelTier.FAST: [],
+            ModelTier.BALANCED: [],
+            ModelTier.POWERFUL: [],
+        }
+        
+        # Кэш доступных моделей
+        self._available_models_cache: List[str] = []
+        self._cache_timestamp: float = 0
+        self._cache_ttl: float = 300  # 5 минут
         
         # Метрики производительности (для оптимизации)
         self.performance_metrics: Dict[str, Dict[str, float]] = {}
     
-    def _initialize_model_tiers(self) -> Dict[ModelTier, List[Dict[str, Any]]]:
-        """Инициализирует конфигурацию моделей по уровням
-        
-        Оптимизировано для работы с 30+ моделями 60B+ параметров
+    async def _refresh_model_tiers(self) -> None:
         """
-        # Динамически определяем модели из доступных
-        # Пока используем статическую конфигурацию, но можно расширить
+        Динамически загружает доступные модели с сервера и распределяет по tier'ам.
+        """
+        import time
+        import re
+        
+        current_time = time.time()
+        if current_time - self._cache_timestamp < self._cache_ttl and self._available_models_cache:
+            return
+        
+        available_models = []
+        
+        # Получаем список моделей с Ollama
+        if self.llm_manager:
+            ollama_provider = self.llm_manager.providers.get("ollama")
+            if ollama_provider and hasattr(ollama_provider, 'list_models'):
+                try:
+                    available_models = await ollama_provider.list_models()
+                    logger.debug(f"Loaded {len(available_models)} models from Ollama")
+                except Exception as e:
+                    logger.warning(f"Failed to list models from Ollama: {e}")
+        
+        if not available_models:
+            # Fallback на статические модели если не удалось получить список
+            self.model_tiers = self._get_fallback_tiers()
+            return
+        
+        # Распределяем модели по tier'ам на основе размера
+        fast_models = []
+        balanced_models = []
+        powerful_models = []
+        
+        for model_name in available_models:
+            model_info = self._classify_model(model_name)
+            
+            if model_info["tier"] == "fast":
+                fast_models.append(model_info)
+            elif model_info["tier"] == "balanced":
+                balanced_models.append(model_info)
+            else:
+                powerful_models.append(model_info)
+        
+        self.model_tiers = {
+            ModelTier.FAST: fast_models if fast_models else self._get_fallback_tiers()[ModelTier.FAST],
+            ModelTier.BALANCED: balanced_models if balanced_models else self._get_fallback_tiers()[ModelTier.BALANCED],
+            ModelTier.POWERFUL: powerful_models if powerful_models else self._get_fallback_tiers()[ModelTier.POWERFUL],
+        }
+        
+        self._available_models_cache = available_models
+        self._cache_timestamp = current_time
+        
+        logger.info(
+            f"Model tiers updated: fast={len(fast_models)}, "
+            f"balanced={len(balanced_models)}, powerful={len(powerful_models)}"
+        )
+    
+    def _classify_model(self, model_name: str) -> Dict[str, Any]:
+        """
+        Классифицирует модель по размеру и определяет её tier.
+        """
+        import re
+        
+        model_lower = model_name.lower()
+        
+        # Извлекаем размер модели
+        size_b = 7.0  # Default
+        
+        match = re.search(r':?(\d+(?:\.\d+)?)[bB]', model_name)
+        if match:
+            size_b = float(match.group(1))
+        elif ':' in model_name:
+            tag = model_name.split(':')[1]
+            match = re.search(r'(\d+(?:\.\d+)?)', tag)
+            if match:
+                size_b = float(match.group(1))
+        
+        # Определяем tier по размеру
+        if size_b <= 4:
+            tier = "fast"
+            speed = "fast"
+            max_tokens = 500
+        elif size_b <= 14:
+            tier = "balanced"
+            speed = "medium"
+            max_tokens = 2000
+        else:
+            tier = "powerful"
+            speed = "slow"
+            max_tokens = 4000
+        
+        return {
+            "provider": "ollama",
+            "model": model_name,
+            "size_b": size_b,
+            "max_tokens": max_tokens,
+            "speed": speed,
+            "tier": tier,
+        }
+    
+    def _get_fallback_tiers(self) -> Dict[ModelTier, List[Dict[str, Any]]]:
+        """Возвращает fallback конфигурацию моделей"""
         return {
             ModelTier.FAST: [
-                {"provider": "ollama", "model": "gemma3:1b", "max_tokens": 500, "speed": "fast"},
-                {"provider": "ollama", "model": "tinyllama", "max_tokens": 500, "speed": "fast"},
-                # Добавляем быстрые модели для простых задач
-                {"provider": "ollama", "model": "phi", "max_tokens": 500, "speed": "fast"},
+                {"provider": "ollama", "model": "llama3.2:3b", "max_tokens": 500, "speed": "fast"},
+                {"provider": "ollama", "model": "gemma2:2b", "max_tokens": 500, "speed": "fast"},
             ],
             ModelTier.BALANCED: [
-                {"provider": "ollama", "model": "llama2", "max_tokens": 2000, "speed": "medium"},
-                {"provider": "ollama", "model": "mistral", "max_tokens": 2000, "speed": "medium"},
-                {"provider": "ollama", "model": "neural-chat", "max_tokens": 2000, "speed": "medium"},
+                {"provider": "ollama", "model": "llama3.2:latest", "max_tokens": 2000, "speed": "medium"},
+                {"provider": "ollama", "model": "gemma2:9b", "max_tokens": 2000, "speed": "medium"},
             ],
             ModelTier.POWERFUL: [
-                # Модели 60B+ параметров для сложных задач
-                {"provider": "ollama", "model": "llama2:70b", "max_tokens": 4000, "speed": "slow"},
-                {"provider": "ollama", "model": "codellama:70b", "max_tokens": 4000, "speed": "slow"},
-                {"provider": "ollama", "model": "mistral:70b", "max_tokens": 4000, "speed": "slow"},
-                {"provider": "ollama", "model": "llama3:70b", "max_tokens": 4000, "speed": "slow"},
-                {"provider": "ollama", "model": "deepseek-coder:67b", "max_tokens": 4000, "speed": "slow"},
-                # Добавляем поддержку других больших моделей
+                {"provider": "ollama", "model": "llama3.1:70b", "max_tokens": 4000, "speed": "slow"},
                 {"provider": "ollama", "model": "qwen2.5:72b", "max_tokens": 4000, "speed": "slow"},
-                {"provider": "ollama", "model": "mixtral:8x7b", "max_tokens": 4000, "speed": "slow"},
             ]
         }
     
@@ -107,6 +200,9 @@ class SmartModelSelector:
         Returns:
             ModelSelection с выбранной моделью
         """
+        # Динамически обновляем список моделей с сервера
+        await self._refresh_model_tiers()
+        
         # Определяем сложность, если не указана
         if not complexity:
             complexity = self._estimate_complexity(task, task_type)
@@ -131,29 +227,26 @@ class SmartModelSelector:
         )
     
     def _estimate_complexity(self, task: str, task_type: Optional[str] = None) -> str:
-        """Оценивает сложность задачи"""
-        task_len = len(task)
+        """
+        Оценивает сложность задачи используя единый TaskComplexityService.
         
-        # Простые задачи
-        if task_len < 50 or task_type == "simple_chat":
-            return "low"
+        Returns:
+            "low", "medium", или "high"
+        """
+        service = get_complexity_service()
+        result = service.analyze(task, task_type=task_type)
         
-        # Сложные проекты
-        complex_keywords = [
-            "система", "system", "framework", "фреймворк",
-            "приложение", "application", "app",
-            "игра", "game", "cloud", "облако",
-            "IDE", "редактор", "editor"
-        ]
+        # Маппинг ComplexityLevel на простые уровни
+        level_mapping = {
+            ComplexityLevel.TRIVIAL: "low",
+            ComplexityLevel.SIMPLE: "low",
+            ComplexityLevel.MODERATE: "medium",
+            ComplexityLevel.COMPLEX: "high",
+            ComplexityLevel.VERY_COMPLEX: "high",
+            ComplexityLevel.EXTREME: "high",
+        }
         
-        if any(keyword in task.lower() for keyword in complex_keywords):
-            return "high"
-        
-        # Средние задачи
-        if task_len < 200:
-            return "medium"
-        else:
-            return "high"
+        return level_mapping.get(result.level, "medium")
     
     def _determine_tier(
         self,

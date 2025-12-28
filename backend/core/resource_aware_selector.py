@@ -14,10 +14,12 @@ from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 from .logger import get_logger
+from .types import ModelTier
+
 logger = get_logger(__name__)
 
 from ..llm.providers import LLMProviderManager
-from .smart_model_selector import SmartModelSelector, ModelTier, ModelSelection
+from .smart_model_selector import SmartModelSelector, ModelSelection
 from .model_performance_tracker import get_performance_tracker
 from .distributed_model_router import DistributedModelRouter
 from .intelligent_model_router import IntelligentModelRouter, ScoredModel

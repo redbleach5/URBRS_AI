@@ -9,25 +9,15 @@ import re
 import asyncio
 from typing import Dict, Any, Optional, Tuple
 from dataclasses import dataclass
-from enum import Enum
 from .logger import get_logger
+from .types import ComplexityLevel
 
 logger = get_logger(__name__)
 
 
-class ComplexityLevel(Enum):
-    """Уровни сложности задачи"""
-    TRIVIAL = "trivial"      # Простой вопрос, приветствие
-    SIMPLE = "simple"        # Простая задача (< 1 мин)
-    MODERATE = "moderate"    # Умеренная сложность (1-5 мин)
-    COMPLEX = "complex"      # Сложная задача (5-15 мин)
-    VERY_COMPLEX = "very_complex"  # Очень сложная (15-30 мин)
-    EXTREME = "extreme"      # Экстремально сложная (30+ мин)
-
-
 @dataclass
 class ComplexityEstimate:
-    """Результат анализа сложности"""
+    """Результат анализа сложности (специфичный для этого модуля)"""
     level: ComplexityLevel
     estimated_minutes: float
     warning_message: Optional[str]

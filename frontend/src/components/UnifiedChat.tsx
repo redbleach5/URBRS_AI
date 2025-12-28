@@ -462,10 +462,24 @@ export function UnifiedChat() {
     }
   };
 
+  // State for inline confirmations
+  const [pendingAction, setPendingAction] = useState<{
+    type: 'clear' | 'delete' | 'rename';
+    id?: string;
+    value?: string;
+  } | null>(null);
+
   const clearHistory = () => {
-    if (currentConversation && confirm('Очистить историю разговора?')) {
-      clearConversation(currentConversation.id);
+    if (currentConversation) {
+      setPendingAction({ type: 'clear', id: currentConversation.id });
     }
+  };
+
+  const confirmClearHistory = () => {
+    if (pendingAction?.type === 'clear' && pendingAction.id) {
+      clearConversation(pendingAction.id);
+    }
+    setPendingAction(null);
   };
 
   const handleNewChat = () => {
@@ -475,16 +489,26 @@ export function UnifiedChat() {
   };
 
   const handleRename = (id: string) => {
-    const title = prompt('Название чата', conversations[id]?.title || '');
-    if (title !== null) {
-      renameConversation(id, title);
+    const currentTitle = conversations[id]?.title || '';
+    setPendingAction({ type: 'rename', id, value: currentTitle });
+  };
+
+  const confirmRename = () => {
+    if (pendingAction?.type === 'rename' && pendingAction.id && pendingAction.value !== undefined) {
+      renameConversation(pendingAction.id, pendingAction.value);
     }
+    setPendingAction(null);
   };
 
   const handleDelete = (id: string) => {
-    if (confirm('Удалить этот чат?')) {
-      deleteConversation(id);
+    setPendingAction({ type: 'delete', id });
+  };
+
+  const confirmDelete = () => {
+    if (pendingAction?.type === 'delete' && pendingAction.id) {
+      deleteConversation(pendingAction.id);
     }
+    setPendingAction(null);
   };
 
   const handleRunCode = (code: string, messageId: string, files?: any[]) => {
@@ -571,6 +595,64 @@ export function UnifiedChat() {
           onToggleWebSocket={toggleWebSocket}
         />
       </div>
+
+      {/* Confirmation Modal */}
+      {pendingAction && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-[#1a1d2e] border border-[#2a2f46] rounded-xl shadow-2xl max-w-md w-full mx-4 overflow-hidden">
+            <div className="p-6">
+              {pendingAction.type === 'rename' ? (
+                <>
+                  <h3 className="text-lg font-semibold text-gray-100 mb-4">Переименовать чат</h3>
+                  <input
+                    type="text"
+                    value={pendingAction.value || ''}
+                    onChange={(e) => setPendingAction({ ...pendingAction, value: e.target.value })}
+                    className="w-full px-4 py-2.5 bg-[#0f111b] border border-[#2a2f46] rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30"
+                    placeholder="Название чата"
+                    autoFocus
+                    onKeyDown={(e) => e.key === 'Enter' && confirmRename()}
+                  />
+                </>
+              ) : (
+                <>
+                  <h3 className="text-lg font-semibold text-gray-100 mb-2">
+                    {pendingAction.type === 'clear' ? 'Очистить историю?' : 'Удалить чат?'}
+                  </h3>
+                  <p className="text-gray-400 text-sm">
+                    {pendingAction.type === 'clear' 
+                      ? 'Все сообщения в этом чате будут удалены. Это действие нельзя отменить.'
+                      : 'Чат и вся его история будут удалены. Это действие нельзя отменить.'
+                    }
+                  </p>
+                </>
+              )}
+            </div>
+            <div className="flex border-t border-[#2a2f46]">
+              <button
+                onClick={() => setPendingAction(null)}
+                className="flex-1 px-4 py-3 text-gray-400 hover:text-gray-200 hover:bg-[#1f2236] transition-colors text-sm font-medium"
+              >
+                Отмена
+              </button>
+              <button
+                onClick={() => {
+                  if (pendingAction.type === 'rename') confirmRename();
+                  else if (pendingAction.type === 'clear') confirmClearHistory();
+                  else if (pendingAction.type === 'delete') confirmDelete();
+                }}
+                className={`flex-1 px-4 py-3 text-sm font-medium transition-colors border-l border-[#2a2f46] ${
+                  pendingAction.type === 'delete' 
+                    ? 'text-red-400 hover:text-red-300 hover:bg-red-500/10' 
+                    : 'text-blue-400 hover:text-blue-300 hover:bg-blue-500/10'
+                }`}
+              >
+                {pendingAction.type === 'rename' ? 'Сохранить' : 'Подтвердить'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
