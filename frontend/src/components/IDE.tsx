@@ -6,7 +6,7 @@ import {
   Code, Code2, Terminal, Database, Globe, Lock,
   Brain, Target, Files, Search, Cpu, Sparkles,
   CircleCheck, CircleX, Clock, Loader2, BarChart3,
-  GitCommit, Play, Plus, X, ChevronLeft, ChevronRight,
+  GitCommit, Play, Plus, X, ChevronLeft, ChevronRight, ChevronDown,
   History, Package, Layers, AlertCircle, ChevronUp,
   Save, Trash2, Edit3, Copy, MoreVertical, Command,
   GitBranch, Keyboard, Eye, CornerDownLeft, Hash,
@@ -171,8 +171,9 @@ export function IDE() {
   // AI Analysis state
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState<any>(null);
-  const [analysisType, setAnalysisType] = useState('overview');
+  const [analysisType, setAnalysisType] = useState('comprehensive');
   const [customQuestion, setCustomQuestion] = useState('');
+  const [showAnalysisMenu, setShowAnalysisMenu] = useState(false);
   
   // Progress state
   const [progressStage, setProgressStage] = useState<string>('');
@@ -1336,6 +1337,78 @@ export function IDE() {
             {running ? <Loader2 size={14} strokeWidth={1.5} className="animate-spin" /> : <Play size={14} strokeWidth={1.5} />}
             <span className="hidden sm:inline">Запуск</span>
           </button>
+          {/* Analysis Button with Dropdown */}
+          <div className="relative">
+            <div className="flex">
+              <button
+                data-analyze-trigger
+                onClick={handleAnalyze}
+                disabled={analyzing || !projectPath}
+                className="px-3 py-1.5 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 rounded-l-lg text-xs font-medium transition-colors flex items-center gap-1.5"
+                title="AI-анализ проекта"
+              >
+                {analyzing ? <Loader2 size={14} strokeWidth={1.5} className="animate-spin" /> : <Brain size={14} strokeWidth={1.5} />}
+                <span className="hidden sm:inline">Анализ</span>
+              </button>
+              <button
+                onClick={() => setShowAnalysisMenu(!showAnalysisMenu)}
+                disabled={analyzing || !projectPath}
+                className="px-1.5 py-1.5 bg-purple-700 hover:bg-purple-800 disabled:opacity-50 rounded-r-lg text-xs transition-colors border-l border-purple-500"
+                title="Выбор типа анализа"
+              >
+                <ChevronDown size={12} strokeWidth={1.5} />
+              </button>
+            </div>
+            
+            {/* Analysis Type Dropdown */}
+            {showAnalysisMenu && (
+              <div className="absolute right-0 top-full mt-1 w-64 bg-[#1a1d2e] border border-[#2a2f46] rounded-lg shadow-xl z-50 overflow-hidden">
+                <div className="px-3 py-2 border-b border-[#2a2f46] text-xs text-gray-400">
+                  Тип анализа
+                </div>
+                {[
+                  { id: 'comprehensive', name: 'Полный анализ', desc: 'Архитектура, качество, рекомендации' },
+                  { id: 'overview', name: 'Обзор проекта', desc: 'Структура и технологии' },
+                  { id: 'quality', name: 'Качество кода', desc: 'Code review и best practices' },
+                  { id: 'security', name: 'Безопасность', desc: 'Уязвимости и риски' },
+                  { id: 'performance', name: 'Производительность', desc: 'Оптимизация и bottlenecks' },
+                ].map(type => (
+                  <button
+                    key={type.id}
+                    onClick={() => {
+                      setAnalysisType(type.id);
+                      setShowAnalysisMenu(false);
+                      handleAnalyze();
+                    }}
+                    className={`w-full px-3 py-2 text-left text-xs hover:bg-[#252840] transition-colors ${
+                      analysisType === type.id ? 'bg-purple-900/30 border-l-2 border-purple-500' : ''
+                    }`}
+                  >
+                    <div className="font-medium text-white">{type.name}</div>
+                    <div className="text-[10px] text-gray-500">{type.desc}</div>
+                  </button>
+                ))}
+                
+                {/* Custom question */}
+                <div className="px-3 py-2 border-t border-[#2a2f46]">
+                  <input
+                    type="text"
+                    value={customQuestion}
+                    onChange={(e) => setCustomQuestion(e.target.value)}
+                    placeholder="Свой вопрос о проекте..."
+                    className="w-full px-2 py-1.5 text-xs bg-[#0f111b] border border-[#1f2236] rounded focus:outline-none focus:border-purple-500 text-white placeholder-gray-500"
+                    onKeyPress={(e) => {
+                      if (e.key === 'Enter' && customQuestion.trim()) {
+                        setAnalysisType('custom');
+                        setShowAnalysisMenu(false);
+                        handleAnalyze();
+                      }
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
           <button
             onClick={() => handleSaveFile()}
             disabled={saving || !activeFile || !openFiles.find(f => f.path === activeFile)?.isDirty}
@@ -2036,6 +2109,14 @@ export function IDE() {
         <div 
           className="fixed inset-0 z-40" 
           onClick={() => setContextMenu(null)}
+        />
+      )}
+      
+      {/* Click outside to close analysis menu */}
+      {showAnalysisMenu && (
+        <div 
+          className="fixed inset-0 z-40" 
+          onClick={() => setShowAnalysisMenu(false)}
         />
       )}
     </div>
