@@ -46,7 +46,14 @@ class IntegrationAgent(BaseAgent):
         
         logger.info(f"IntegrationAgent executing task: {task}")
         
-        system_prompt = """You are an integration specialist. Your task is to integrate with external services, APIs, and systems.
+        # Get relevant context from RAG
+        rag_context = await self._get_context(task)
+        rag_section = ""
+        if rag_context and len(rag_context.strip()) > 50:
+            rag_section = f"\n\nRelevant context from knowledge base:\n{rag_context[:2000]}\n"
+            logger.debug(f"IntegrationAgent: Added RAG context ({len(rag_context)} chars)")
+        
+        system_prompt = f"""You are an integration specialist. Your task is to integrate with external services, APIs, and systems.
 
 Capabilities:
 - REST API integration
@@ -57,7 +64,7 @@ Capabilities:
 - Data transformation
 - Error handling and retries
 - Rate limiting
-
+{rag_section}
 Provide integration code and configuration."""
         
         user_prompt = f"""Integration Task: {task}

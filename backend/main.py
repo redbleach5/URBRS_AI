@@ -11,7 +11,7 @@ import uvicorn
 from .config import get_config
 from .core.engine import IDAEngine
 from .core.logger import get_logger, configure_logging, create_logging_middleware
-from .api.routers import tasks, code, tools, preview, config as config_router, monitoring, project, multimodal, metrics, batch, feedback, learning, chat, models, secret, code_intelligence
+from .api.routers import tasks, code, tools, preview, config as config_router, monitoring, project, multimodal, metrics, batch, feedback, learning, chat, models, secret, code_intelligence, code_testing
 from .api.docs import custom_openapi
 from .core.preview_manager import PreviewManager
 from .core.rate_limiter import RateLimitMiddleware, RateLimiter
@@ -130,6 +130,7 @@ app.include_router(learning.router, prefix="/api/v1", tags=["learning"])
 app.include_router(chat.router, prefix="/api/v1", tags=["chat"])
 app.include_router(models.router, prefix="/api/v1", tags=["models"])
 app.include_router(code_intelligence.router, prefix="/api/v1", tags=["code-intelligence"])
+app.include_router(code_testing.router, prefix="/api/v1", tags=["code-testing"])
 app.include_router(secret.router, prefix="/api/secret")  # 🥚 Скрытый роутер
 
 

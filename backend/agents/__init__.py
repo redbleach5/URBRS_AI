@@ -13,6 +13,7 @@ from .monitoring import MonitoringAgent
 from .reflection_mixin import ReflectionMixin, ReflectionResult, ReflectionQuality
 from .uncertainty_search_mixin import UncertaintySearchMixin
 from .self_consistency_mixin import SelfConsistencyMixin
+from .fact_checker_mixin import FactCheckerMixin, FactCheckResult, FactConfidence
 from .communicator import (
     AgentCommunicator,
     AgentMessage,
@@ -44,6 +45,10 @@ __all__ = [
     "UncertaintySearchMixin",
     # Self-Consistency
     "SelfConsistencyMixin",
+    # Fact Checker
+    "FactCheckerMixin",
+    "FactCheckResult",
+    "FactConfidence",
     # Communication
     "AgentCommunicator",
     "AgentMessage",

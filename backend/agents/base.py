@@ -5,9 +5,11 @@ Base Agent class with reflection and communication capabilities
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List, TYPE_CHECKING, AsyncIterator
 from datetime import datetime
+import time
+import hashlib
+import json
 from ..core.logger import get_logger
 logger = get_logger(__name__)
-import time
 
 from ..llm.providers import LLMProviderManager
 from ..llm.base import LLMMessage
@@ -81,6 +83,14 @@ class BaseAgent(ABC, ReflectionMixin, UncertaintySearchMixin):
         # Communication
         self._communicator: Optional["AgentCommunicator"] = None
         
+        # === RESULT CACHING ===
+        # Cache for identical task results (same task hash within TTL)
+        self._result_cache: Dict[str, Dict[str, Any]] = {}
+        self._cache_timestamps: Dict[str, float] = {}
+        self._cache_ttl = config.get("cache_ttl", 300)  # 5 minutes default
+        self._cache_enabled = config.get("cache_enabled", True)
+        self._cache_max_size = 100
+        
         # Configure reflection from config
         reflection_config = config.get("reflection", {})
         self.configure_reflection(
@@ -105,6 +115,57 @@ class BaseAgent(ABC, ReflectionMixin, UncertaintySearchMixin):
         """Set the agent communicator for inter-agent communication"""
         self._communicator = communicator
     
+    def _get_task_cache_key(self, task: str, context: Optional[Dict[str, Any]] = None) -> str:
+        """Generate cache key for task + context combination."""
+        # Only include stable context keys for caching
+        cache_context = {}
+        if context:
+            for key in ["preferred_model", "mode", "language"]:
+                if key in context:
+                    cache_context[key] = context[key]
+        
+        cache_data = {
+            "agent": self.name,
+            "task": task,
+            "context": cache_context
+        }
+        return hashlib.md5(json.dumps(cache_data, sort_keys=True).encode()).hexdigest()
+    
+    def _get_cached_result(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        """Get result from cache if valid."""
+        if not self._cache_enabled:
+            return None
+        
+        if cache_key in self._result_cache:
+            timestamp = self._cache_timestamps.get(cache_key, 0)
+            if time.time() - timestamp < self._cache_ttl:
+                logger.debug(f"Agent {self.name}: Cache HIT for task")
+                return self._result_cache[cache_key].copy()
+            else:
+                # Expired
+                del self._result_cache[cache_key]
+                self._cache_timestamps.pop(cache_key, None)
+        return None
+    
+    def _cache_result(self, cache_key: str, result: Dict[str, Any]) -> None:
+        """Cache successful result with LRU eviction."""
+        if not self._cache_enabled:
+            return
+        
+        # Only cache successful results
+        if not result.get("success", True):
+            return
+        
+        # LRU eviction
+        if len(self._result_cache) >= self._cache_max_size:
+            oldest_key = min(self._cache_timestamps, key=self._cache_timestamps.get)
+            del self._result_cache[oldest_key]
+            del self._cache_timestamps[oldest_key]
+        
+        self._result_cache[cache_key] = result.copy()
+        self._cache_timestamps[cache_key] = time.time()
+        logger.debug(f"Agent {self.name}: Cached result")
+    
     async def execute(self, task: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Execute a task with optional reflection and self-correction.
@@ -118,6 +179,16 @@ class BaseAgent(ABC, ReflectionMixin, UncertaintySearchMixin):
         """
         if not self._initialized:
             await self.initialize()
+        
+        # === RESULT CACHING ===
+        # Check cache for identical task (skip caching if context has 'skip_cache' flag)
+        cache_key = None
+        if self._cache_enabled and not (context or {}).get("skip_cache"):
+            cache_key = self._get_task_cache_key(task, context)
+            cached = self._get_cached_result(cache_key)
+            if cached:
+                cached["cached"] = True
+                return cached
         
         start_time = time.time()
         ctx = context or {}
@@ -195,6 +266,10 @@ class BaseAgent(ABC, ReflectionMixin, UncertaintySearchMixin):
                 result=result,
                 duration=duration
             )
+            
+            # === CACHE SUCCESSFUL RESULT ===
+            if cache_key and result.get("success", True):
+                self._cache_result(cache_key, result)
             
             return result
             

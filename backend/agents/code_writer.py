@@ -22,6 +22,7 @@ from ..core.exceptions import AgentException
 from ..core.two_stage_processor import TwoStageProcessor, ProcessingStage
 from ..core.text_utils import extract_code_from_markdown, detect_language_from_task
 from ..core.code_validator import CodeValidator, get_code_validator, ValidationResult
+from ..core.code_tester import CodeTester, get_code_tester, TestResult
 
 
 def validate_python_syntax(code: str) -> Tuple[bool, Optional[str]]:
@@ -188,6 +189,10 @@ class CodeWriterAgent(BaseAgent, MultimodalMixin, SelfConsistencyMixin):
     # Maximum number of syntax fix attempts
     MAX_SYNTAX_FIX_ATTEMPTS = 2
     
+    # Testing configuration
+    AUTO_TEST_ENABLED = True  # Автоматически тестировать сгенерированный код
+    AUTO_FIX_ON_TEST_FAILURE = True  # Автоматически исправлять при провале тестов
+    
     def __init__(self, *args, **kwargs):
         BaseAgent.__init__(self, *args, **kwargs)
         MultimodalMixin.__init__(self)
@@ -195,6 +200,9 @@ class CodeWriterAgent(BaseAgent, MultimodalMixin, SelfConsistencyMixin):
         
         # Initialize advanced code validator
         self._code_validator: Optional[CodeValidator] = None
+        
+        # Initialize code tester for runtime testing
+        self._code_tester: Optional[CodeTester] = None
         
         # Configure self-consistency for critical tasks
         self.configure_self_consistency(
@@ -210,6 +218,59 @@ class CodeWriterAgent(BaseAgent, MultimodalMixin, SelfConsistencyMixin):
         if self._code_validator is None:
             self._code_validator = get_code_validator(llm_manager=self.llm_manager)
         return self._code_validator
+    
+    @property
+    def code_tester(self) -> CodeTester:
+        """Lazy initialization of code tester."""
+        if self._code_tester is None:
+            self._code_tester = get_code_tester(llm_manager=self.llm_manager)
+        return self._code_tester
+    
+    async def _test_code(
+        self,
+        code: str,
+        task: str,
+        language: str = "python"
+    ) -> Tuple[str, TestResult]:
+        """
+        Test generated code and fix if tests fail.
+        
+        Args:
+            code: Generated code to test
+            task: Original task description
+            language: Programming language
+            
+        Returns:
+            Tuple of (possibly_fixed_code, test_result)
+        """
+        if not self.AUTO_TEST_ENABLED or language != "python":
+            # Return empty test result for non-Python or when testing disabled
+            return code, TestResult(success=True, code_ran_successfully=True)
+        
+        try:
+            if self.AUTO_FIX_ON_TEST_FAILURE:
+                # Use test_and_fix for automatic correction
+                return await self.code_tester.test_and_fix(
+                    code=code,
+                    task_description=task,
+                    max_fix_attempts=2
+                )
+            else:
+                # Just test without fixing
+                result = await self.code_tester.test_code(
+                    code=code,
+                    language=language,
+                    task_description=task
+                )
+                return code, result
+                
+        except Exception as e:
+            logger.warning(f"Code testing failed: {e}")
+            # Return original code with failed test result
+            return code, TestResult(
+                success=False,
+                execution_error=str(e)
+            )
     
     async def _validate_and_fix_code(
         self,
@@ -594,6 +655,13 @@ JSON ответ:
                                 code, task
                             )
                             
+                            # Test the code if syntax is valid
+                            test_result = None
+                            if is_valid:
+                                validated_code, test_result = await self._test_code(
+                                    validated_code, task
+                                )
+                            
                             result_dict = {
                                 "agent": self.name,
                                 "task": task,
@@ -601,16 +669,22 @@ JSON ответ:
                                 "success": True,
                                 "two_stage": True,
                                 "syntax_validated": is_valid,
-                                "syntax_error": syntax_error if not is_valid else None
+                                "syntax_error": syntax_error if not is_valid else None,
+                                "test_result": test_result.to_dict() if test_result else None,
+                                "tests_passed": test_result.success if test_result else None
                             }
                             
-                            # Save to memory only if syntax is valid (quality control)
-                            if self.memory and is_valid:
+                            # Save to memory only if syntax is valid and tests pass (quality control)
+                            if self.memory and is_valid and (not test_result or test_result.success):
                                 await self.memory.save_solution(
                                     task=task,
                                     solution=validated_code,
                                     agent=self.name,
-                                    metadata={**(context or {}), "syntax_validated": True}
+                                    metadata={
+                                        **(context or {}), 
+                                        "syntax_validated": True,
+                                        "tests_passed": test_result.success if test_result else None
+                                    }
                                 )
                             
                             return result_dict
@@ -632,22 +706,35 @@ JSON ответ:
                 code, task
             )
             
+            # Test the code if syntax is valid
+            test_result = None
+            if is_valid:
+                validated_code, test_result = await self._test_code(
+                    validated_code, task
+                )
+            
             result = {
                 "agent": self.name,
                 "task": task,
                 "code": validated_code,
                 "success": True,
                 "syntax_validated": is_valid,
-                "syntax_error": syntax_error if not is_valid else None
+                "syntax_error": syntax_error if not is_valid else None,
+                "test_result": test_result.to_dict() if test_result else None,
+                "tests_passed": test_result.success if test_result else None
             }
             
-            # Save to memory only if syntax is valid (quality control)
-            if self.memory and is_valid:
+            # Save to memory only if syntax is valid and tests pass (quality control)
+            if self.memory and is_valid and (not test_result or test_result.success):
                 await self.memory.save_solution(
                     task=task,
                     solution=validated_code,
                     agent=self.name,
-                    metadata={**(context or {}), "syntax_validated": True}
+                    metadata={
+                        **(context or {}), 
+                        "syntax_validated": True,
+                        "tests_passed": test_result.success if test_result else None
+                    }
                 )
             
             return result

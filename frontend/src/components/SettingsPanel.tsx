@@ -1,7 +1,18 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { getConfig, updateConfig, checkAvailability, checkOllamaServer } from '../api/client';
-import { Settings, CircleX, RefreshCw, FileCode, Loader2, AlertTriangle, Lightbulb, Bot } from 'lucide-react';
+import { 
+  getConfig, 
+  updateConfig, 
+  checkAvailability, 
+  checkOllamaServer,
+  getRoutingPolicy,
+  updateRoutingPolicy,
+  getProvidersInfo,
+  RoutingPolicy,
+  ProviderInfo,
+  COST_TIER_LABELS
+} from '../api/client';
+import { Settings, CircleX, RefreshCw, FileCode, Loader2, AlertTriangle, Lightbulb, Bot, Shield, Zap, Lock, DollarSign } from 'lucide-react';
 
 function get(obj: any, path: string, defaultValue?: any) {
   return path.split('.').reduce((acc, key) => (acc && acc[key] !== undefined ? acc[key] : undefined), obj) ?? defaultValue;
@@ -42,6 +53,13 @@ export default function SettingsPanel() {
   const [checkingAvailability, setCheckingAvailability] = useState(false);
   const [ollamaStatus, setOllamaStatus] = useState<any>(null);
   const [checkingOllama, setCheckingOllama] = useState(false);
+  
+  // Routing Policy state
+  const [routingPolicy, setRoutingPolicy] = useState<RoutingPolicy | null>(null);
+  const [policyPresets, setPolicyPresets] = useState<Record<string, RoutingPolicy>>({});
+  const [providersInfo, setProvidersInfo] = useState<ProviderInfo[]>([]);
+  const [policyLoading, setPolicyLoading] = useState(false);
+  const [policyError, setPolicyError] = useState<string | null>(null);
 
   useEffect(() => {
     if (data) {
@@ -50,8 +68,80 @@ export default function SettingsPanel() {
       setJsonText(JSON.stringify(data, null, 2));
       setJsonError(null);
       setHasChanges(false);
+      
+      // Загружаем политику маршрутизации и информацию о провайдерах
+      loadRoutingPolicy();
+      loadProvidersInfo();
     }
   }, [data]);
+
+  const loadRoutingPolicy = async () => {
+    setPolicyLoading(true);
+    setPolicyError(null);
+    try {
+      const response = await getRoutingPolicy();
+      if (response.success) {
+        setRoutingPolicy(response.policy);
+        setPolicyPresets(response.presets);
+      }
+    } catch (e: any) {
+      setPolicyError(e.message || 'Ошибка загрузки политики');
+    } finally {
+      setPolicyLoading(false);
+    }
+  };
+
+  const loadProvidersInfo = async () => {
+    try {
+      const response = await getProvidersInfo();
+      if (response.success) {
+        setProvidersInfo(response.providers);
+      }
+    } catch (e) {
+      // Игнорируем ошибки загрузки провайдеров
+    }
+  };
+
+  const handlePolicyChange = async (updates: Partial<RoutingPolicy>) => {
+    if (!routingPolicy) return;
+    
+    const newPolicy = { ...routingPolicy, ...updates };
+    setRoutingPolicy(newPolicy);
+    
+    try {
+      const response = await updateRoutingPolicy(newPolicy);
+      if (response.success) {
+        setMessageType('success');
+        setMessage('Политика маршрутизации обновлена');
+        setTimeout(() => setMessage(null), 3000);
+      }
+    } catch (e: any) {
+      setMessageType('error');
+      setMessage(e.message || 'Ошибка обновления политики');
+      // Откатываем изменения
+      loadRoutingPolicy();
+    }
+  };
+
+  const applyPreset = async (presetName: string) => {
+    const preset = policyPresets[presetName];
+    if (!preset) return;
+    
+    setRoutingPolicy(preset);
+    
+    try {
+      const response = await updateRoutingPolicy(preset);
+      if (response.success) {
+        setMessageType('success');
+        setMessage(`Применён пресет: ${presetName}`);
+        setTimeout(() => setMessage(null), 3000);
+      }
+    } catch (e: any) {
+      setMessageType('error');
+      setMessage(e.message || 'Ошибка применения пресета');
+      loadRoutingPolicy();
+    }
+  };
 
   // Автоматическая проверка доступности при первой загрузке
   const [hasPerformedInitialCheck, setHasPerformedInitialCheck] = useState(false);
@@ -522,6 +612,236 @@ export default function SettingsPanel() {
             <p className="text-xs text-gray-400 mt-1">
               Ollama является приоритетным провайдером для локальной работы. Система автоматически использует Ollama, если он доступен.
             </p>
+          </section>
+
+          {/* Политика маршрутизации моделей */}
+          <section className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-semibold flex items-center gap-2">
+                  <Shield size={20} strokeWidth={1.5} className="text-green-400" />
+                  Политика маршрутизации
+                </h3>
+                <p className="text-xs text-gray-400 mt-1">
+                  Контролируйте баланс между приватностью, стоимостью и качеством
+                </p>
+              </div>
+              {policyLoading && (
+                <Loader2 size={16} className="animate-spin text-blue-400" />
+              )}
+            </div>
+
+            {policyError && (
+              <div className="p-3 bg-red-900/30 border border-red-500/60 rounded-xl text-red-300 text-sm">
+                {policyError}
+              </div>
+            )}
+
+            {routingPolicy && (
+              <>
+                {/* Быстрые пресеты */}
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => applyPreset('privacy_first')}
+                    className={`px-3 py-2 text-xs rounded-xl border-2 transition-all duration-200 flex items-center gap-1.5 ${
+                      routingPolicy.require_private 
+                        ? 'bg-green-900/40 border-green-500/60 text-green-300' 
+                        : 'bg-[#1a1d2e] border-[#2a2f46] text-gray-300 hover:border-green-500/40'
+                    }`}
+                  >
+                    <Lock size={12} />
+                    Приватность
+                  </button>
+                  <button
+                    onClick={() => applyPreset('cost_first')}
+                    className={`px-3 py-2 text-xs rounded-xl border-2 transition-all duration-200 flex items-center gap-1.5 ${
+                      routingPolicy.prefer_cheap && routingPolicy.max_cost_tier <= 2
+                        ? 'bg-yellow-900/40 border-yellow-500/60 text-yellow-300' 
+                        : 'bg-[#1a1d2e] border-[#2a2f46] text-gray-300 hover:border-yellow-500/40'
+                    }`}
+                  >
+                    <DollarSign size={12} />
+                    Экономия
+                  </button>
+                  <button
+                    onClick={() => applyPreset('quality_first')}
+                    className={`px-3 py-2 text-xs rounded-xl border-2 transition-all duration-200 flex items-center gap-1.5 ${
+                      routingPolicy.prefer_quality && routingPolicy.min_quality >= 0.8
+                        ? 'bg-purple-900/40 border-purple-500/60 text-purple-300' 
+                        : 'bg-[#1a1d2e] border-[#2a2f46] text-gray-300 hover:border-purple-500/40'
+                    }`}
+                  >
+                    <Zap size={12} />
+                    Качество
+                  </button>
+                  <button
+                    onClick={() => applyPreset('balanced')}
+                    className={`px-3 py-2 text-xs rounded-xl border-2 transition-all duration-200 flex items-center gap-1.5 ${
+                      routingPolicy.prefer_local && routingPolicy.prefer_quality && !routingPolicy.require_private && !routingPolicy.prefer_cheap
+                        ? 'bg-blue-900/40 border-blue-500/60 text-blue-300' 
+                        : 'bg-[#1a1d2e] border-[#2a2f46] text-gray-300 hover:border-blue-500/40'
+                    }`}
+                  >
+                    <Settings size={12} />
+                    Баланс
+                  </button>
+                </div>
+
+                {/* Основные переключатели */}
+                <div className="bg-[#1a1d2e] p-4 rounded-xl border-2 border-[#2a2f46] space-y-4">
+                  {/* Приватность */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Lock size={16} className={routingPolicy.require_private ? 'text-green-400' : 'text-gray-400'} />
+                      <div>
+                        <div className="text-sm font-medium">Только приватные модели</div>
+                        <div className="text-xs text-gray-400">Данные не уходят в облако (только Ollama)</div>
+                      </div>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={routingPolicy.require_private}
+                        onChange={(e) => handlePolicyChange({ require_private: e.target.checked })}
+                        className="sr-only peer"
+                      />
+                      <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-green-500/50 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-600"></div>
+                    </label>
+                  </div>
+
+                  {/* Предпочитать локальные */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Bot size={16} className={routingPolicy.prefer_local ? 'text-purple-400' : 'text-gray-400'} />
+                      <div>
+                        <div className="text-sm font-medium">Предпочитать локальные модели</div>
+                        <div className="text-xs text-gray-400">Ollama в приоритете перед облаком</div>
+                      </div>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={routingPolicy.prefer_local}
+                        onChange={(e) => handlePolicyChange({ prefer_local: e.target.checked })}
+                        className="sr-only peer"
+                      />
+                      <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-purple-500/50 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-600"></div>
+                    </label>
+                  </div>
+
+                  {/* Предпочитать дешёвые */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <DollarSign size={16} className={routingPolicy.prefer_cheap ? 'text-yellow-400' : 'text-gray-400'} />
+                      <div>
+                        <div className="text-sm font-medium">Предпочитать дешёвые модели</div>
+                        <div className="text-xs text-gray-400">Экономия на облачных API</div>
+                      </div>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={routingPolicy.prefer_cheap}
+                        onChange={(e) => handlePolicyChange({ prefer_cheap: e.target.checked })}
+                        className="sr-only peer"
+                      />
+                      <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-yellow-500/50 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-yellow-600"></div>
+                    </label>
+                  </div>
+
+                  {/* Максимальная стоимость */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm font-medium">Максимальный уровень стоимости</div>
+                      <span className="text-xs px-2 py-1 bg-[#0f111b] border border-[#2a2f46] rounded-lg">
+                        {COST_TIER_LABELS[routingPolicy.max_cost_tier] || 'Премиум'}
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="1"
+                      max="4"
+                      value={routingPolicy.max_cost_tier}
+                      onChange={(e) => handlePolicyChange({ max_cost_tier: parseInt(e.target.value) })}
+                      className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                    />
+                    <div className="flex justify-between text-xs text-gray-400">
+                      <span>🆓 Бесплатно</span>
+                      <span>💰 Дёшево</span>
+                      <span>💎 Стандарт</span>
+                      <span>👑 Премиум</span>
+                    </div>
+                  </div>
+
+                  {/* Минимальное качество */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm font-medium">Минимальное качество модели</div>
+                      <span className="text-xs px-2 py-1 bg-[#0f111b] border border-[#2a2f46] rounded-lg">
+                        {Math.round(routingPolicy.min_quality * 100)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      value={routingPolicy.min_quality * 100}
+                      onChange={(e) => handlePolicyChange({ min_quality: parseInt(e.target.value) / 100 })}
+                      className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                    />
+                    <div className="flex justify-between text-xs text-gray-400">
+                      <span>Любое</span>
+                      <span>Высокое</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Информация о провайдерах */}
+                {providersInfo.length > 0 && (
+                  <div className="space-y-2">
+                    <div className="text-sm font-medium text-gray-300">Доступные провайдеры:</div>
+                    <div className="grid gap-2">
+                      {providersInfo.map((provider) => (
+                        <div 
+                          key={provider.name}
+                          className={`flex items-center justify-between p-3 rounded-xl border-2 ${
+                            provider.enabled
+                              ? provider.is_private 
+                                ? 'bg-green-900/20 border-green-500/40' 
+                                : 'bg-[#1a1d2e] border-[#2a2f46]'
+                              : 'bg-gray-900/30 border-gray-700/40 opacity-50'
+                          }`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+                              provider.is_local ? 'bg-purple-900/40' : 'bg-blue-900/40'
+                            }`}>
+                              {provider.is_local ? (
+                                <Bot size={16} className="text-purple-400" />
+                              ) : (
+                                <Zap size={16} className="text-blue-400" />
+                              )}
+                            </div>
+                            <div>
+                              <div className="text-sm font-medium capitalize flex items-center gap-2">
+                                {provider.name}
+                                {provider.is_private && (
+                                  <span title="Приватный"><Lock size={12} className="text-green-400" /></span>
+                                )}
+                              </div>
+                              <div className="text-xs text-gray-400">{provider.description}</div>
+                            </div>
+                          </div>
+                          <div className="text-xs px-2 py-1 rounded-lg bg-[#0f111b] border border-[#2a2f46]">
+                            {COST_TIER_LABELS[provider.cost_tier]}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
           </section>
 
         {/* Секция API Сервера удалена - эти настройки (host, port, workers, reload) 

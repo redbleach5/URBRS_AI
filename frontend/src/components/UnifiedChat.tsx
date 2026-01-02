@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { executeTask, processBatchTasks, sendChat, ChatMessage as APIChatMessage } from '../api/client';
+import { executeTask, processBatchTasks, sendChat, ChatMessage as APIChatMessage, getRoutingPolicy, RoutingPolicy } from '../api/client';
 import { useChatStore, ChatMode, FeedbackData } from '../state/chatStore';
 import { useExecutionInfo } from '../state/executionContext';
 import {
-  MessageSquare, Bot, Zap, ChevronDown, CircleCheck, FileText, Wifi, WifiOff
+  MessageSquare, Bot, Zap, ChevronDown, CircleCheck, FileText, Wifi, WifiOff, Shield, Lock
 } from 'lucide-react';
 
 // Import new components
@@ -84,6 +84,24 @@ export function UnifiedChat() {
     const stored = localStorage.getItem('wsEnabled');
     return stored === null ? true : stored === 'true';
   });
+  
+  // Privacy/routing policy state
+  const [routingPolicy, setRoutingPolicy] = useState<RoutingPolicy | null>(null);
+  
+  // Load routing policy on mount
+  useEffect(() => {
+    const loadPolicy = async () => {
+      try {
+        const response = await getRoutingPolicy();
+        if (response.success) {
+          setRoutingPolicy(response.policy);
+        }
+      } catch (e) {
+        // Ignore errors, fallback to default
+      }
+    };
+    loadPolicy();
+  }, []);
   
   const handleWsProgress = useCallback((progress: ProgressUpdate) => {
     setWsProgress(progress);
@@ -283,10 +301,21 @@ export function UnifiedChat() {
             finalContent = `${chatResponse.warning}\n\n---\n\n${chatResponse.message}`;
           }
           
+          // Извлекаем thinking из metadata
+          const chatThinking = chatResponse.metadata?.thinking || undefined;
+          const chatMetadata = chatResponse.metadata ? {
+            provider: chatResponse.metadata.provider,
+            model: chatResponse.metadata.model,
+            thinking_mode: chatResponse.metadata.has_thinking || Boolean(chatThinking),
+            thinking_native: (chatResponse.metadata as any).thinking_native,
+            thinking_emulated: (chatResponse.metadata as any).thinking_emulated,
+          } : undefined;
+          
           updateMessage(convId, assistantMessageId, {
             content: finalContent,
             status: 'completed',
-            metadata: chatResponse.metadata
+            thinking: chatThinking,
+            metadata: chatMetadata
           });
         } else {
           updateMessage(convId, assistantMessageId, {
@@ -595,6 +624,7 @@ export function UnifiedChat() {
           wsConnected={wsConnected}
           wsEnabled={wsEnabled}
           onToggleWebSocket={toggleWebSocket}
+          routingPolicy={routingPolicy}
         />
       </div>
 
@@ -741,6 +771,8 @@ interface InputAreaProps {
   wsConnected?: boolean;
   wsEnabled?: boolean;
   onToggleWebSocket?: () => void;
+  // Routing policy
+  routingPolicy?: RoutingPolicy | null;
 }
 
 const InputArea: React.FC<InputAreaProps> = ({
@@ -766,6 +798,7 @@ const InputArea: React.FC<InputAreaProps> = ({
   wsConnected,
   wsEnabled,
   onToggleWebSocket,
+  routingPolicy,
 }) => {
   const ModeIcon = modeInfo[currentMode].icon;
   
@@ -891,6 +924,34 @@ const InputArea: React.FC<InputAreaProps> = ({
               rows={1}
               disabled={isLoading}
             />
+
+            {/* Privacy Indicator */}
+            {routingPolicy && (
+              <div
+                className={`px-2 py-2.5 h-full flex items-center justify-center flex-shrink-0 border-l border-[#1f2236] ${
+                  routingPolicy.require_private 
+                    ? 'text-green-400' 
+                    : routingPolicy.prefer_local 
+                    ? 'text-purple-400' 
+                    : 'text-gray-500'
+                }`}
+                title={
+                  routingPolicy.require_private 
+                    ? '🔒 Режим приватности: данные не уходят в облако (только Ollama)' 
+                    : routingPolicy.prefer_local 
+                    ? '🦙 Приоритет локальных моделей (Ollama)' 
+                    : '☁️ Могут использоваться облачные модели'
+                }
+              >
+                {routingPolicy.require_private ? (
+                  <Lock size={14} strokeWidth={1.5} />
+                ) : routingPolicy.prefer_local ? (
+                  <Shield size={14} strokeWidth={1.5} />
+                ) : (
+                  <Shield size={14} strokeWidth={1.5} className="opacity-40" />
+                )}
+              </div>
+            )}
 
             {/* WebSocket Toggle */}
             {onToggleWebSocket && (

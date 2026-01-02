@@ -146,6 +146,14 @@ async def execute_task(request: Request, task_request: Dict[str, Any]):
             response_data["metadata"]["recovered"] = True
             response_data["metadata"]["recovery_method"] = result.get("recovery_method", "fallback_agent")
         
+        # Добавляем результаты проверки фактов (FactCheckerMixin)
+        if result.get("fact_check"):
+            response_data["metadata"]["fact_check"] = result["fact_check"]
+        
+        # Добавляем результаты тестирования кода (CodeTester)
+        if result.get("test_result"):
+            response_data["metadata"]["test_result"] = result["test_result"]
+        
         # Добавляем информацию о сложности
         if complexity_info:
             response_data["metadata"]["complexity_level"] = complexity_info.level.value

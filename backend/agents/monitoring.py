@@ -35,7 +35,14 @@ class MonitoringAgent(BaseAgent):
         
         logger.info(f"MonitoringAgent executing task: {task}")
         
-        system_prompt = """You are a monitoring and observability expert. Your task is to monitor systems, analyze metrics, and provide insights.
+        # Get relevant context from RAG
+        rag_context = await self._get_context(task)
+        rag_section = ""
+        if rag_context and len(rag_context.strip()) > 50:
+            rag_section = f"\n\nRelevant context from knowledge base:\n{rag_context[:2000]}\n"
+            logger.debug(f"MonitoringAgent: Added RAG context ({len(rag_context)} chars)")
+        
+        system_prompt = f"""You are a monitoring and observability expert. Your task is to monitor systems, analyze metrics, and provide insights.
 
 Capabilities:
 - Performance monitoring
@@ -46,7 +53,7 @@ Capabilities:
 - Resource usage monitoring
 - Model performance tracking
 - A/B testing analysis
-
+{rag_section}
 Provide monitoring dashboards, alerts, and recommendations."""
         
         user_prompt = f"""Monitoring Task: {task}

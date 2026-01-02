@@ -1,12 +1,16 @@
-import React, { useState, memo } from 'react';
+import React, { useState, memo, useCallback } from 'react';
 import { 
   CircleCheck, CircleX, Brain, Search, RefreshCw, Zap, 
-  AlertTriangle, Lightbulb, Clock, Bot, FileText, ThumbsUp, ThumbsDown
+  AlertTriangle, Lightbulb, Clock, Bot, FileText, ThumbsUp, ThumbsDown,
+  ChevronDown, ChevronUp, Sparkles, Hash
 } from 'lucide-react';
 import { renderMarkdown } from './MarkdownRenderer';
 import { CodeBlock, extractCodeFromMarkdown, CodeExecutionResult } from './CodeExecutor';
 import { ChatMessage as Message, ReflectionData, FeedbackData } from '../state/chatStore';
 import { submitFeedback } from '../api/client';
+import { TestResultPanel, TestResultData } from './TestResultPanel';
+import { FactCheckBadge, FactCheckData } from './FactCheckBadge';
+import { ChatContextIndicator } from './ChatContextIndicator';
 
 // Re-export for convenience
 export type { Message };
@@ -19,23 +23,169 @@ type MessageMetadata = Message['metadata'];
 
 interface ThinkingTraceProps {
   thinking: string;
+  isNative?: boolean;
+  isEmulated?: boolean;
 }
 
-const ThinkingTrace: React.FC<ThinkingTraceProps> = memo(({ thinking }) => (
-  <div className="mb-4 p-4 bg-gradient-to-br from-purple-900/30 to-purple-800/20 border border-purple-500/40 rounded-xl shadow-lg">
-    <div className="flex items-center justify-between mb-3">
-      <div className="flex items-center gap-2">
-        <span className="text-sm font-semibold text-purple-300 flex items-center gap-2">
-          <Brain size={18} strokeWidth={1.5} />
-          <span>Reasoning Process</span>
-        </span>
+const ThinkingTrace: React.FC<ThinkingTraceProps> = memo(({ thinking, isNative, isEmulated }) => {
+  const [isExpanded, setIsExpanded] = useState(false);
+  
+  // Count thinking steps (lines or paragraphs)
+  const thinkingLines = thinking.split('\n').filter(line => line.trim().length > 0);
+  const wordCount = thinking.split(/\s+/).length;
+  const charCount = thinking.length;
+  
+  // Determine complexity indicator
+  const getComplexityLabel = () => {
+    if (wordCount > 500) return { label: 'Глубокий анализ', color: 'text-purple-300', bg: 'bg-purple-500/20' };
+    if (wordCount > 200) return { label: 'Детальный', color: 'text-blue-300', bg: 'bg-blue-500/20' };
+    if (wordCount > 50) return { label: 'Краткий', color: 'text-cyan-300', bg: 'bg-cyan-500/20' };
+    return { label: 'Быстрый', color: 'text-green-300', bg: 'bg-green-500/20' };
+  };
+  
+  const complexity = getComplexityLabel();
+  
+  // Parse thinking into structured steps if possible
+  const parseThinkingSteps = useCallback(() => {
+    // Try to detect numbered steps or bullet points
+    const stepPatterns = [
+      /^(\d+)[.)]\s*/gm,           // 1. or 1)
+      /^[-•]\s*/gm,                // - or •
+      /^(Step|Шаг)\s*\d+/gim,      // Step N or Шаг N
+    ];
+    
+    let steps: { type: 'step' | 'thought'; content: string }[] = [];
+    let currentContent = thinking;
+    
+    // Split by common patterns
+    const lines = thinking.split('\n');
+    let currentStep = '';
+    
+    for (const line of lines) {
+      const isStepStart = stepPatterns.some(p => p.test(line));
+      // Reset regex lastIndex
+      stepPatterns.forEach(p => p.lastIndex = 0);
+      
+      if (isStepStart && currentStep) {
+        steps.push({ type: 'step', content: currentStep.trim() });
+        currentStep = line;
+      } else {
+        currentStep += (currentStep ? '\n' : '') + line;
+      }
+    }
+    
+    if (currentStep) {
+      steps.push({ type: 'step', content: currentStep.trim() });
+    }
+    
+    return steps.length > 1 ? steps : null;
+  }, [thinking]);
+  
+  const structuredSteps = parseThinkingSteps();
+  
+  return (
+    <div className="mb-4 overflow-hidden rounded-xl border border-purple-500/40 shadow-lg transition-all duration-300">
+      {/* Header - Always visible */}
+      <button
+        onClick={() => setIsExpanded(!isExpanded)}
+        className="w-full p-4 bg-gradient-to-br from-purple-900/40 to-purple-800/30 hover:from-purple-900/50 hover:to-purple-800/40 transition-all duration-200 flex items-center justify-between gap-3 group"
+      >
+        <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <Brain size={20} strokeWidth={1.5} className="text-purple-400" />
+              {isNative && (
+                <Sparkles size={10} className="absolute -top-1 -right-1 text-yellow-400" />
+              )}
+            </div>
+            <span className="text-sm font-semibold text-purple-300">
+              Цепочка рассуждений
+            </span>
+          </div>
+          
+          {/* Type badge */}
+          {(isNative || isEmulated) && (
+            <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${
+              isNative 
+                ? 'bg-green-500/20 text-green-300 border border-green-500/30' 
+                : 'bg-yellow-500/20 text-yellow-300 border border-yellow-500/30'
+            }`}>
+              {isNative ? '✓ Native' : '⚡ Emulated'}
+            </span>
+          )}
+          
+          {/* Complexity badge */}
+          <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${complexity.bg} ${complexity.color} border border-current/20`}>
+            {complexity.label}
+          </span>
+          
+          {/* Stats */}
+          <div className="hidden sm:flex items-center gap-2 text-[10px] text-purple-400/70">
+            <span className="flex items-center gap-1">
+              <Hash size={10} />
+              {thinkingLines.length} строк
+            </span>
+            <span>•</span>
+            <span>{wordCount} слов</span>
+          </div>
+        </div>
+        
+        {/* Expand/Collapse icon */}
+        <div className="flex items-center gap-2">
+          {!isExpanded && (
+            <span className="text-[10px] text-purple-400/60 hidden sm:inline">
+              Нажмите для просмотра
+            </span>
+          )}
+          <div className={`p-1.5 rounded-lg bg-purple-500/20 text-purple-300 transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}>
+            <ChevronDown size={16} strokeWidth={2} />
+          </div>
+        </div>
+      </button>
+      
+      {/* Collapsible content */}
+      <div className={`transition-all duration-300 ease-out ${
+        isExpanded ? 'max-h-[600px] opacity-100' : 'max-h-0 opacity-0'
+      } overflow-hidden`}>
+        <div className="p-4 bg-[#0f111b]/60 border-t border-purple-500/20">
+          {structuredSteps ? (
+            // Structured view with steps
+            <div className="space-y-3">
+              {structuredSteps.map((step, idx) => (
+                <div 
+                  key={idx}
+                  className="flex gap-3 animate-fade-in"
+                  style={{ animationDelay: `${idx * 0.05}s` }}
+                >
+                  <div className="flex-shrink-0 w-6 h-6 rounded-full bg-purple-500/30 border border-purple-500/40 flex items-center justify-center">
+                    <span className="text-[10px] font-bold text-purple-300">{idx + 1}</span>
+                  </div>
+                  <div className="flex-1 text-sm text-purple-200/90 leading-relaxed whitespace-pre-wrap font-mono bg-purple-900/10 p-2 rounded-lg border border-purple-500/10">
+                    {step.content}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            // Plain text view
+            <div className="text-sm text-purple-200/90 whitespace-pre-wrap font-mono leading-relaxed max-h-[500px] overflow-y-auto custom-scrollbar p-3 bg-purple-900/10 rounded-lg border border-purple-500/10">
+              {thinking}
+            </div>
+          )}
+        </div>
       </div>
+      
+      {/* Preview when collapsed */}
+      {!isExpanded && (
+        <div className="px-4 py-2 bg-[#0f111b]/40 border-t border-purple-500/20">
+          <p className="text-xs text-purple-300/60 italic truncate">
+            {thinking.substring(0, 150)}...
+          </p>
+        </div>
+      )}
     </div>
-    <div className="text-xs text-purple-200/90 whitespace-pre-wrap font-mono max-h-48 overflow-y-auto leading-relaxed bg-[#0f111b]/40 p-3 rounded-lg border border-purple-500/20">
-      {thinking}
-    </div>
-  </div>
-));
+  );
+});
 
 ThinkingTrace.displayName = 'ThinkingTrace';
 
@@ -434,6 +584,16 @@ export const ChatMessage: React.FC<ChatMessageComponentProps> = memo(({
                   </div>
                 )}
 
+                {/* Context indicators (summarized, RAG, web search) */}
+                {message.metadata && (
+                  <ChatContextIndicator
+                    chatSummarized={message.metadata.chat_summarized}
+                    ragContextUsed={message.metadata.rag_context_used}
+                    webSearchUsed={message.metadata.web_search_used}
+                    thinkingMode={message.metadata.thinking_mode}
+                  />
+                )}
+
                 {/* Code Block */}
                 {code && (
                   <CodeBlock
@@ -446,18 +606,41 @@ export const ChatMessage: React.FC<ChatMessageComponentProps> = memo(({
                     onDownloadCode={onDownloadCode}
                   />
                 )}
+                
+                {/* Test Results Panel (for code generation) */}
+                {message.metadata?.test_result && (
+                  <TestResultPanel 
+                    testResult={message.metadata.test_result as TestResultData}
+                  />
+                )}
 
                 {/* Thinking trace */}
-                {message.thinking && <ThinkingTrace thinking={message.thinking} />}
+                {message.thinking && (
+                  <ThinkingTrace 
+                    thinking={message.thinking} 
+                    isNative={message.metadata?.thinking_native}
+                    isEmulated={message.metadata?.thinking_emulated}
+                  />
+                )}
 
                 {/* Reflection */}
                 {message.reflection && (
                   <ReflectionPanel reflection={message.reflection} metadata={message.metadata} />
                 )}
 
-                {/* Provider and model info */}
-                {message.metadata && (message.metadata.provider || message.metadata.model) && (
-                  <ProviderInfo metadata={message.metadata} />
+                {/* Provider and model info + Fact Check badge */}
+                {message.metadata && (message.metadata.provider || message.metadata.model || message.metadata.fact_check) && (
+                  <div className="flex items-center gap-2 flex-wrap mb-3 -mt-1">
+                    {(message.metadata.provider || message.metadata.model) && (
+                      <ProviderInfo metadata={message.metadata} />
+                    )}
+                    {message.metadata.fact_check && message.metadata.fact_check.claims_checked > 0 && (
+                      <FactCheckBadge 
+                        factCheck={message.metadata.fact_check as FactCheckData}
+                        showDetails={true}
+                      />
+                    )}
+                  </div>
                 )}
 
                 {/* Markdown content (when no code) */}

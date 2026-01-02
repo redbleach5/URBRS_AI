@@ -10,6 +10,9 @@ from .types import (
     ModelTier,
     ComplexityResult,
     ModelSelection,
+    CostTier,
+    ProviderInfo,
+    RoutingPolicy,
 )
 
 from .task_complexity_service import (
@@ -24,10 +27,11 @@ from .unified_model_router import (
     IModelRouter,
 )
 
-# NOTE: code_validator и multi_agent_synthesis НЕ экспортируются здесь,
-# т.к. они зависят от llm.providers, что создаёт циклический импорт.
+# NOTE: Следующие модули НЕ экспортируются здесь из-за зависимостей на LLM.
 # Импортируйте их напрямую:
 #   from backend.core.code_validator import CodeValidator, get_code_validator
+#   from backend.core.code_tester import CodeTester, get_code_tester
+#   from backend.core.chat_summarizer import ChatSummarizer, get_chat_summarizer
 #   from backend.core.multi_agent_synthesis import MultiAgentSynthesizer, get_multi_agent_synthesizer
 
 __all__ = [
@@ -44,6 +48,9 @@ __all__ = [
     'ModelTier',
     'ComplexityResult',
     'ModelSelection',
+    'CostTier',
+    'ProviderInfo',
+    'RoutingPolicy',
     # Complexity Service
     'TaskComplexityService',
     'get_complexity_service',

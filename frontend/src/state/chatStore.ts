@@ -43,6 +43,40 @@ export interface ChatMessage {
     reflection_attempts?: number; // How many correction attempts were made
     corrected?: boolean; // Was the result corrected
     execution_time?: number; // Execution time in seconds
+    // New: code testing results
+    test_result?: {
+      success: boolean;
+      tests_run: number;
+      tests_passed: number;
+      tests_failed: number;
+      pass_rate?: number;
+      code_ran_successfully: boolean;
+      test_cases?: Array<{
+        name: string;
+        status: string;
+        error?: string;
+      }>;
+      has_generated_tests?: boolean;
+    };
+    tests_passed?: boolean;
+    // New: fact checking results
+    fact_check?: {
+      claims_checked: number;
+      claims_verified: number;
+      claims_disputed: number;
+      claims_uncertain: number;
+      overall_reliability: number;
+      has_corrections?: boolean;
+      claims?: Array<{
+        text: string;
+        confidence: string;
+        sources: string[];
+      }>;
+    };
+    // New: chat context indicators
+    chat_summarized?: boolean;
+    rag_context_used?: boolean;
+    web_search_used?: boolean;
   };
 }
 

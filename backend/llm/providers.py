@@ -2,7 +2,8 @@
 LLM Provider Manager - Manages multiple LLM providers
 """
 
-from typing import Dict, Optional, List
+import asyncio
+from typing import Dict, Optional, List, Tuple
 from ..core.logger import get_logger
 logger = get_logger(__name__)
 
@@ -297,4 +298,72 @@ class LLMProviderManager:
             return f"Anthropic {model or 'Claude'} — облачная модель с расширенными возможностями"
         else:
             return f"Модель {model or provider}"
+    
+    async def generate_batch(
+        self,
+        requests: List[Tuple[List[LLMMessage], Optional[Dict]]],
+        max_concurrent: int = 5,
+        provider_name: Optional[str] = None,
+        model: Optional[str] = None,
+        temperature: float = 0.7,
+        **kwargs
+    ) -> List[LLMResponse]:
+        """
+        Execute multiple LLM requests in parallel with concurrency limit.
+        
+        More efficient than sequential calls for multiple independent requests.
+        
+        Args:
+            requests: List of (messages, extra_kwargs) tuples
+            max_concurrent: Maximum concurrent requests (default 5)
+            provider_name: Provider to use
+            model: Model name
+            temperature: Temperature setting
+            **kwargs: Additional parameters for all requests
+            
+        Returns:
+            List of LLMResponses in the same order as requests
+        """
+        if not requests:
+            return []
+        
+        semaphore = asyncio.Semaphore(max_concurrent)
+        
+        async def process_request(idx: int, messages: List[LLMMessage], extra_kwargs: Optional[Dict]) -> Tuple[int, LLMResponse]:
+            async with semaphore:
+                merged_kwargs = {**kwargs}
+                if extra_kwargs:
+                    merged_kwargs.update(extra_kwargs)
+                
+                try:
+                    response = await self.generate(
+                        messages=messages,
+                        provider_name=provider_name,
+                        model=model,
+                        temperature=temperature,
+                        **merged_kwargs
+                    )
+                    return (idx, response)
+                except Exception as e:
+                    logger.warning(f"Batch request {idx} failed: {e}")
+                    # Return error response
+                    return (idx, LLMResponse(
+                        content=f"Error: {str(e)}",
+                        model=model or "unknown",
+                        provider=provider_name or self.default_provider_name,
+                        usage={}
+                    ))
+        
+        # Create tasks preserving order
+        tasks = [
+            process_request(idx, msgs, extra)
+            for idx, (msgs, extra) in enumerate(requests)
+        ]
+        
+        # Execute concurrently
+        results = await asyncio.gather(*tasks)
+        
+        # Sort by index and return responses
+        results.sort(key=lambda x: x[0])
+        return [r[1] for r in results]
 

@@ -5,6 +5,7 @@ Enhanced with:
 - Multi-Agent Synthesis for combining results
 - Better task routing and model selection
 - Adaptive timeouts based on task complexity
+- RAG context integration for task enrichment
 """
 
 import asyncio
@@ -17,6 +18,8 @@ from .agents.base import AgentRegistry
 from .llm.providers import LLMProviderManager
 from .llm.base import LLMMessage
 from .memory.long_term import LongTermMemory
+from .rag.context_manager import ContextManager
+from .rag.vector_store import VectorStore
 from .core.exceptions import AILLMException
 from .core.error_handler import ErrorHandler
 from .core.llm_classifier import LLMClassifier, AGENT_SELECTION_SCHEMA
@@ -45,7 +48,9 @@ class Orchestrator:
         agent_registry: AgentRegistry,
         llm_manager: LLMProviderManager,
         memory: Optional[LongTermMemory] = None,
-        full_config: Optional[Dict[str, Any]] = None
+        full_config: Optional[Dict[str, Any]] = None,
+        context_manager: Optional[ContextManager] = None,
+        vector_store: Optional[VectorStore] = None
     ):
         """
         Initialize orchestrator
@@ -56,12 +61,16 @@ class Orchestrator:
             llm_manager: LLM provider manager
             memory: Long term memory
             full_config: Полный конфиг приложения (для distributed_mode и др.)
+            context_manager: RAG context manager for task enrichment
+            vector_store: Vector store for semantic search
         """
         self.config = config
         self.agent_registry = agent_registry
         self.llm_manager = llm_manager
         self.memory = memory
         self.full_config = full_config or {}
+        self.context_manager = context_manager
+        self.vector_store = vector_store
         self.max_parallel_tasks = config.max_parallel_tasks
         self.task_timeout = config.task_timeout
         self.auto_recovery = config.auto_recovery
@@ -85,6 +94,89 @@ class Orchestrator:
         """Initialize orchestrator"""
         self._initialized = True
         logger.info("Orchestrator initialized")
+    
+    async def _enrich_with_rag_context(
+        self,
+        task: str,
+        context: Optional[Dict[str, Any]] = None,
+        max_context_tokens: int = 2000
+    ) -> Dict[str, Any]:
+        """
+        Enrich task context with relevant information from RAG.
+        
+        Args:
+            task: Task description
+            context: Existing context dict
+            max_context_tokens: Maximum tokens for RAG context
+            
+        Returns:
+            Enriched context dict with RAG information
+        """
+        enriched_context = context.copy() if context else {}
+        
+        # Skip if RAG already applied or explicitly disabled
+        if enriched_context.get("_rag_applied") or enriched_context.get("skip_rag"):
+            return enriched_context
+        
+        rag_context_parts = []
+        
+        # 1. Get relevant context from ContextManager
+        if self.context_manager:
+            try:
+                relevant_context = await self.context_manager.get_context(
+                    query=task,
+                    max_tokens=max_context_tokens,
+                    use_expansion=True,
+                    use_multi_query=True
+                )
+                if relevant_context and len(relevant_context.strip()) > 50:
+                    rag_context_parts.append(f"=== Relevant Context ===\n{relevant_context}")
+                    logger.debug(f"RAG context added: {len(relevant_context)} chars")
+            except Exception as e:
+                logger.warning(f"Failed to get RAG context: {e}")
+        
+        # 2. Search for similar past solutions in memory
+        if self.memory:
+            try:
+                similar_tasks = await self.memory.search_similar_tasks_with_quality(
+                    task=task,
+                    top_k=3,
+                    min_quality=30.0  # Minimum quality threshold
+                )
+                if similar_tasks:
+                    solutions_text = []
+                    for st in similar_tasks[:2]:  # Top 2 most relevant
+                        similarity = st.get("similarity", 0)
+                        quality = st.get("quality_score", 0)
+                        if similarity > 0.6 and quality > 30:
+                            solution_preview = st.get("solution", "")[:500]
+                            solutions_text.append(
+                                f"- Similar task (similarity: {similarity:.0%}, quality: {quality:.0f}):\n"
+                                f"  Task: {st.get('task', '')[:100]}\n"
+                                f"  Solution: {solution_preview}..."
+                            )
+                    
+                    if solutions_text:
+                        rag_context_parts.append(
+                            "=== Similar Past Solutions ===\n" + "\n".join(solutions_text)
+                        )
+                        logger.debug(f"Added {len(similar_tasks)} similar solutions to context")
+                
+                # 3. Get error avoidance warnings
+                error_warnings = await self.memory.get_error_avoidance_prompt(task)
+                if error_warnings:
+                    rag_context_parts.append(error_warnings)
+                    
+            except Exception as e:
+                logger.warning(f"Failed to search memory: {e}")
+        
+        # Combine RAG context
+        if rag_context_parts:
+            enriched_context["rag_context"] = "\n\n".join(rag_context_parts)
+            enriched_context["_rag_applied"] = True
+            logger.info(f"Task enriched with RAG context ({len(enriched_context['rag_context'])} chars)")
+        
+        return enriched_context
     
     async def execute_task(
         self,
@@ -170,15 +262,9 @@ class Orchestrator:
             except Exception as e:
                 logger.warning(f"Adaptive selection failed: {e}")
         
-        # Check memory for similar tasks (with quality scores)
-        if self.memory:
-            # Используем улучшенный поиск с учетом качества решений
-            if hasattr(self.memory, 'search_similar_tasks_with_quality'):
-                await self.memory.search_similar_tasks_with_quality(
-                    task, top_k=5, min_quality=20.0  # Минимум 20% качества
-                )
-            else:
-                await self.memory.search_similar_tasks(task)
+        # ======= RAG CONTEXT ENRICHMENT =======
+        # Enrich task context with relevant information from RAG and memory
+        context = await self._enrich_with_rag_context(task, context)
         
         # Теперь НЕ форсируем агента на основе ключевых слов
         # Вся логика классификации делегирована LLMClassifier в _select_agent()

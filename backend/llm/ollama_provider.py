@@ -803,28 +803,34 @@ Show your reasoning process clearly. Think deeply before providing your final an
                             thinking_content = data["message"]["thinking"]
                     
                     # Если thinking не найден в структурированном ответе,
-                    # пытаемся извлечь из content (для эмуляции или моделей без нативной поддержки)
+                    # пытаемся извлечь из content (для DeepSeek-R1 и других моделей)
                     if not thinking_content and content:
-                        reasoning_markers = [
-                            "Let me think", "Thinking:", "Reasoning:", "Analysis:",
-                            "Думаю:", "Рассуждение:", "Анализ:", "<think>", "</think>"
-                        ]
-                        for marker in reasoning_markers:
-                            if marker.lower() in content.lower():
-                                # Найдено reasoning в ответе
-                                marker_pos = content.lower().find(marker.lower())
-                                # Извлекаем thinking блок (до следующего маркера или до конца)
-                                end_marker = content.lower().find("</think>", marker_pos)
-                                if end_marker > marker_pos:
-                                    thinking_content = content[marker_pos:end_marker + 8]
-                                else:
-                                    # Берем следующий абзац как thinking
+                        # Сначала проверяем теги <think>...</think> (DeepSeek-R1 формат)
+                        import re
+                        think_pattern = re.compile(r'<think>(.*?)</think>', re.DOTALL | re.IGNORECASE)
+                        think_match = think_pattern.search(content)
+                        
+                        if think_match:
+                            thinking_content = think_match.group(1).strip()
+                            # Удаляем thinking блок из основного content
+                            content = think_pattern.sub('', content).strip()
+                            logger.debug(f"Extracted thinking from <think> tags: {len(thinking_content)} chars")
+                        else:
+                            # Fallback: ищем другие маркеры reasoning
+                            reasoning_markers = [
+                                "Let me think", "Thinking:", "Reasoning:", "Analysis:",
+                                "Думаю:", "Рассуждение:", "Анализ:"
+                            ]
+                            for marker in reasoning_markers:
+                                if marker.lower() in content.lower():
+                                    marker_pos = content.lower().find(marker.lower())
+                                    # Берем до двойного переноса строки
                                     next_para = content.find("\n\n", marker_pos)
                                     if next_para > marker_pos:
-                                        thinking_content = content[marker_pos:next_para]
+                                        thinking_content = content[marker_pos:next_para].strip()
                                     else:
-                                        thinking_content = content[marker_pos:marker_pos + 500]
-                                break
+                                        thinking_content = content[marker_pos:marker_pos + 500].strip()
+                                    break
             
             # Record successful request metrics
             duration = time.time() - start_time

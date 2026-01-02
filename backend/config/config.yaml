@@ -1,5 +1,16 @@
 llm:
   default_provider: ollama
+  
+  # Политика маршрутизации по умолчанию
+  # Определяет баланс между стоимостью, качеством и приватностью
+  routing_policy:
+    prefer_local: true       # Предпочитать локальные модели (Ollama)
+    require_private: false   # Строго требовать приватность (не использовать облако)
+    max_cost_tier: 3         # Макс. стоимость: 1=FREE, 2=CHEAP, 3=STANDARD, 4=PREMIUM
+    prefer_cheap: false      # Предпочитать дешёвые модели
+    prefer_quality: true     # Предпочитать качество скорости
+    min_quality: 0.5         # Минимальный порог качества (0-1)
+  
   providers:
     openai:
       enabled: true
@@ -11,6 +22,13 @@ llm:
       auto_detect_models: false
       auto_discover: false
       distributed_mode: false
+      # Уровни стоимости моделей: 1=FREE, 2=CHEAP, 3=STANDARD, 4=PREMIUM
+      cost_tier: 3  # STANDARD по умолчанию для OpenAI
+      # Переопределение стоимости для конкретных моделей (опционально):
+      # model_costs:
+      #   gpt-4: 4        # PREMIUM
+      #   gpt-4o-mini: 2  # CHEAP
+      #   gpt-3.5-turbo: 2  # CHEAP
     anthropic:
       enabled: true
       default_model: claude-3-opus-20240229
@@ -20,6 +38,7 @@ llm:
       auto_detect_models: false
       auto_discover: false
       distributed_mode: false
+      cost_tier: 3  # STANDARD по умолчанию для Anthropic
     ollama:
       enabled: true
       base_url: http://192.168.178.126:11434
@@ -34,12 +53,22 @@ llm:
       max_retries: 2
       cache_enabled: true
       auto_detect_models: true
+      cost_tier: 1  # FREE - локальные модели бесплатны
       # Модели выбираются автоматически IntelligentModelRouter
       # на основе возможностей модели и метрик производительности
       # Используем llama3.2:3b - доступна на обоих серверах
       default_model: llama3.2:3b
 rag:
   enabled: true
+  # Автоиндексация проекта при старте
+  auto_index:
+    enabled: true
+    # Путь к проекту для индексации (. = текущая директория)
+    project_path: "."
+    # Максимальное количество файлов для индексации
+    max_files: 500
+    # Индексировать в фоне (не блокировать запуск)
+    background: true
   vector_store:
     type: faiss
     dimension: 384

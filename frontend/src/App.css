@@ -214,3 +214,28 @@ code {
   color: white;
 }
 
+/* Custom scrollbar for thinking/reasoning panels */
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #7c3aed40 #0f111b;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: rgba(139, 92, 246, 0.05);
+  border-radius: 3px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(139, 92, 246, 0.3);
+  border-radius: 3px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(139, 92, 246, 0.5);
+}
+

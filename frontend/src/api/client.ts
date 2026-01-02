@@ -482,3 +482,112 @@ export async function submitFeedback(feedback: {
   }
 }
 
+// ============ Routing Policy API ============
+
+export interface RoutingPolicy {
+  prefer_local: boolean;
+  require_private: boolean;
+  max_cost_tier: number;  // 1=FREE, 2=CHEAP, 3=STANDARD, 4=PREMIUM
+  prefer_cheap: boolean;
+  prefer_quality: boolean;
+  min_quality: number;
+  allowed_providers?: string[] | null;
+  blocked_providers?: string[] | null;
+}
+
+export interface RoutingPolicyResponse {
+  success: boolean;
+  policy: RoutingPolicy;
+  presets: {
+    privacy_first: RoutingPolicy;
+    cost_first: RoutingPolicy;
+    quality_first: RoutingPolicy;
+    balanced: RoutingPolicy;
+  };
+}
+
+export interface ProviderInfo {
+  name: string;
+  is_local: boolean;
+  is_private: boolean;
+  cost_tier: number;
+  cost_tier_name: string;
+  enabled: boolean;
+  description: string;
+}
+
+export interface ProvidersInfoResponse {
+  success: boolean;
+  providers: ProviderInfo[];
+  default_provider: string;
+}
+
+// Названия уровней стоимости
+export const COST_TIER_NAMES: Record<number, string> = {
+  1: 'FREE',
+  2: 'CHEAP',
+  3: 'STANDARD',
+  4: 'PREMIUM'
+};
+
+export const COST_TIER_LABELS: Record<number, string> = {
+  1: '🆓 Бесплатно',
+  2: '💰 Дёшево',
+  3: '💎 Стандарт',
+  4: '👑 Премиум'
+};
+
+export async function getRoutingPolicy(): Promise<RoutingPolicyResponse> {
+  try {
+    const response = await client.get('/models/routing-policy', { 
+      timeout: TIMEOUT_CONFIG.QUICK_REQUEST 
+    });
+    return response.data;
+  } catch (error: any) {
+    // Возвращаем дефолтную политику при ошибке
+    return {
+      success: false,
+      policy: {
+        prefer_local: true,
+        require_private: false,
+        max_cost_tier: 4,
+        prefer_cheap: false,
+        prefer_quality: true,
+        min_quality: 0.5,
+        allowed_providers: null,
+        blocked_providers: null
+      },
+      presets: {
+        privacy_first: { prefer_local: true, require_private: true, max_cost_tier: 4, prefer_cheap: false, prefer_quality: true, min_quality: 0.5, allowed_providers: null, blocked_providers: null },
+        cost_first: { prefer_local: true, require_private: false, max_cost_tier: 2, prefer_cheap: true, prefer_quality: false, min_quality: 0.5, allowed_providers: null, blocked_providers: null },
+        quality_first: { prefer_local: false, require_private: false, max_cost_tier: 4, prefer_cheap: false, prefer_quality: true, min_quality: 0.8, allowed_providers: null, blocked_providers: null },
+        balanced: { prefer_local: true, require_private: false, max_cost_tier: 3, prefer_cheap: false, prefer_quality: true, min_quality: 0.5, allowed_providers: null, blocked_providers: null }
+      }
+    };
+  }
+}
+
+export async function updateRoutingPolicy(policy: Partial<RoutingPolicy>): Promise<RoutingPolicyResponse> {
+  try {
+    const response = await client.put('/models/routing-policy', policy);
+    return response.data;
+  } catch (error: any) {
+    throw new Error(error.message || 'Не удалось обновить политику маршрутизации');
+  }
+}
+
+export async function getProvidersInfo(): Promise<ProvidersInfoResponse> {
+  try {
+    const response = await client.get('/models/providers-info', {
+      timeout: TIMEOUT_CONFIG.QUICK_REQUEST
+    });
+    return response.data;
+  } catch (error: any) {
+    return {
+      success: false,
+      providers: [],
+      default_provider: 'ollama'
+    };
+  }
+}
+

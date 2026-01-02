@@ -8,16 +8,35 @@ logger = get_logger(__name__)
 
 from .base import BaseAgent
 from .multimodal_mixin import MultimodalMixin
+from .fact_checker_mixin import FactCheckerMixin, FactCheckResult
 from ..llm.base import LLMMessage
 from ..core.exceptions import AgentException
 
 
-class ResearchAgent(BaseAgent, MultimodalMixin):
-    """Agent for researching codebase and analyzing requirements"""
+class ResearchAgent(BaseAgent, MultimodalMixin, FactCheckerMixin):
+    """Agent for researching codebase and analyzing requirements.
+    
+    Features:
+    - Web search integration
+    - Multimodal input processing
+    - Fact checking for response verification
+    """
+    
+    # Включаем проверку фактов для исследований
+    FACT_CHECK_ENABLED = True
     
     def __init__(self, *args, **kwargs):
         BaseAgent.__init__(self, *args, **kwargs)
         MultimodalMixin.__init__(self)
+        FactCheckerMixin.__init__(self)
+        
+        # Настраиваем fact checker с доступными инструментами
+        if hasattr(self, 'tool_registry') and self.tool_registry:
+            self.configure_fact_checker(
+                enabled=True,
+                web_search_tool=self.tool_registry,
+                vector_store=getattr(self, 'context_manager', None)
+            )
     
     async def _execute_impl(self, task: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -141,12 +160,38 @@ class ResearchAgent(BaseAgent, MultimodalMixin):
         try:
             report = await self._get_llm_response(messages)
             
+            # === FACT CHECKING ===
+            # Проверяем факты в отчёте для повышения достоверности
+            fact_check_result: FactCheckResult = None
+            if self.FACT_CHECK_ENABLED and self._fact_check_enabled:
+                try:
+                    fact_check_result = await self.check_facts(
+                        response=report,
+                        task=task,
+                        use_web=bool(web_search_results),  # Используем web если уже искали
+                        use_rag=bool(context_text)  # Используем RAG если есть контекст
+                    )
+                    
+                    # Если нашлись проблемы - добавляем предупреждение
+                    if fact_check_result.needs_correction and fact_check_result.corrected_response:
+                        logger.info(f"ResearchAgent: Fact check found issues, applying corrections")
+                        report = fact_check_result.corrected_response
+                    elif fact_check_result.claims_disputed > 0:
+                        logger.warning(f"ResearchAgent: {fact_check_result.claims_disputed} disputed claims found")
+                        
+                except Exception as e:
+                    logger.warning(f"Fact checking failed (non-critical): {e}")
+            
             result = {
                 "agent": self.name,
                 "task": task,
                 "report": report,
                 "success": True
             }
+            
+            # Добавляем результаты проверки фактов
+            if fact_check_result:
+                result["fact_check"] = fact_check_result.to_dict()
             
             # Save to memory
             if self.memory:

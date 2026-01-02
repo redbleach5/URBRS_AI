@@ -27,6 +27,7 @@ from .pydantic_utils import pydantic_to_dict
 from .learning_system import initialize_learning_system, LearningSystem
 from .resource_aware_selector import ResourceAwareSelector
 from .easter_eggs import startup_birthday_check
+from ..project.indexer import ProjectIndexer
 
 
 class IDAEngine:
@@ -75,6 +76,9 @@ class IDAEngine:
         
         # Task for periodic status updates
         self._status_update_task: Optional[asyncio.Task] = None
+        
+        # Task for background auto-indexing
+        self._auto_index_task: Optional[asyncio.Task] = None
         
         logger.info("IDAEngine initialized")
     
@@ -185,14 +189,16 @@ class IDAEngine:
             )
             await self.agent_registry.initialize()
             
-            # Initialize Orchestrator
+            # Initialize Orchestrator with RAG integration
             if self.config.orchestrator and self.config.orchestrator.enabled:
                 self.orchestrator = Orchestrator(
                     self.config.orchestrator,
                     self.agent_registry,
                     self.llm_manager,
                     self.memory,
-                    full_config=self.raw_config
+                    full_config=self.raw_config,
+                    context_manager=self.context_manager,
+                    vector_store=self.vector_store
                 )
                 await self.orchestrator.initialize()
             
@@ -223,6 +229,23 @@ class IDAEngine:
             
             # 🥚 Проверяем пасхалки (например, день рождения создателя)
             startup_birthday_check()
+            
+            # ======= AUTO-INDEXING PROJECT FOR RAG =======
+            # Запускаем автоиндексацию если включена
+            if self.vector_store and self.config.rag:
+                rag_config = pydantic_to_dict(self.config.rag)
+                auto_index_config = rag_config.get("auto_index", {})
+                
+                if auto_index_config.get("enabled", False):
+                    if auto_index_config.get("background", True):
+                        # Запускаем в фоне (не блокирует запуск)
+                        self._auto_index_task = asyncio.create_task(
+                            self._auto_index_project(auto_index_config)
+                        )
+                        logger.info("Auto-indexing started in background")
+                    else:
+                        # Блокирующая индексация
+                        await self._auto_index_project(auto_index_config)
             
             logger.info("IDAEngine initialization complete")
             
@@ -368,9 +391,65 @@ class IDAEngine:
                 self.monitor.log_exception("engine", e, severity=IssueSeverity.ERROR)
             raise AILLMException(f"Configuration update failed: {e}") from e
     
+    async def _auto_index_project(self, config: Dict[str, Any]) -> None:
+        """
+        Auto-index project for RAG on startup.
+        
+        Args:
+            config: Auto-index configuration
+        """
+        project_path = config.get("project_path", ".")
+        max_files = config.get("max_files", 500)
+        
+        try:
+            logger.info(f"Auto-indexing project: {project_path} (max_files={max_files})")
+            
+            indexer = ProjectIndexer(self.vector_store)
+            
+            # Resolve project path
+            resolved_path = Path(project_path).resolve()
+            if not resolved_path.exists():
+                logger.warning(f"Auto-index path does not exist: {resolved_path}")
+                return
+            
+            result = await indexer.index_project(
+                project_path=str(resolved_path),
+                max_file_size=500_000  # 500KB max file size
+            )
+            
+            logger.info(
+                f"Auto-indexing complete: {result.get('files_indexed', 0)} files, "
+                f"{result.get('chunks_created', 0)} chunks"
+            )
+            
+            # Register successful indexing with monitor
+            if self.monitor:
+                self.monitor.log_performance_metric(
+                    "vector_store", 
+                    "auto_index_files", 
+                    result.get('files_indexed', 0)
+                )
+                
+        except Exception as e:
+            logger.error(f"Auto-indexing failed: {e}")
+            if self.monitor:
+                self.monitor.log_exception(
+                    "vector_store", e, 
+                    context={"action": "auto_index"},
+                    severity=IssueSeverity.WARNING
+                )
+    
     async def shutdown(self) -> None:
         """Shutdown all components gracefully"""
         logger.info("Shutting down IDAEngine...")
+        
+        # Stop auto-indexing if running
+        if self._auto_index_task and not self._auto_index_task.done():
+            self._auto_index_task.cancel()
+            try:
+                await self._auto_index_task
+            except asyncio.CancelledError:
+                pass
         
         # Stop periodic status updates
         if self._status_update_task and not self._status_update_task.done():

@@ -39,7 +39,14 @@ class ReactAgent(BaseAgent):
             for name, tool in tools.items()
         ])
         
-        system_prompt = f"""You are a helpful AI assistant that can use tools to solve problems. You excel at deep reasoning and step-by-step problem solving.
+        # Get relevant context from RAG
+        rag_context = await self._get_context(task)
+        rag_section = ""
+        if rag_context and len(rag_context.strip()) > 50:
+            rag_section = f"\n\nRelevant context from knowledge base:\n{rag_context[:2000]}\n"
+            logger.debug(f"ReactAgent: Added RAG context ({len(rag_context)} chars)")
+        
+        system_prompt = f"""You are a helpful AI assistant that can use tools to solve problems. You excel at deep reasoning and step-by-step problem solving.{rag_section}
 
 Available tools:
 {tool_descriptions}

@@ -9,6 +9,7 @@ Extended features:
 """
 
 import json
+import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from ..core.logger import get_logger
@@ -58,6 +59,13 @@ class LongTermMemory:
         self.db: Optional[Any] = None  # aiosqlite.Connection
         self.embeddings_model: Optional[SentenceTransformer] = None
         self._initialized = False
+        
+        # === QUERY CACHING ===
+        # LRU cache for frequent queries (preferences, model recommendations)
+        self._query_cache: Dict[str, Any] = {}
+        self._cache_timestamps: Dict[str, float] = {}
+        self._cache_ttl = 300  # 5 minutes TTL
+        self._cache_max_size = 500
     
     async def initialize(self) -> None:
         """Initialize memory system"""
@@ -74,6 +82,23 @@ class LongTermMemory:
         
         # Initialize database
         self.db = await aiosqlite.connect(str(self.storage_path))
+        
+        # === PERFORMANCE OPTIMIZATIONS ===
+        # Enable WAL mode for better concurrent read/write performance
+        await self.db.execute("PRAGMA journal_mode=WAL")
+        # Increase cache size (default is 2000 pages = ~8MB, we use 10000 = ~40MB)
+        await self.db.execute("PRAGMA cache_size=10000")
+        # Enable memory-mapped I/O for faster reads (256MB)
+        await self.db.execute("PRAGMA mmap_size=268435456")
+        # Synchronous mode: NORMAL is faster than FULL, still safe with WAL
+        await self.db.execute("PRAGMA synchronous=NORMAL")
+        # Enable foreign keys
+        await self.db.execute("PRAGMA foreign_keys=ON")
+        # Optimize temp storage
+        await self.db.execute("PRAGMA temp_store=MEMORY")
+        
+        logger.debug("SQLite performance pragmas configured (WAL mode, cache, mmap)")
+        
         await self._create_tables()
         
         # Initialize embeddings model - reuse from vector_store if available
@@ -105,6 +130,41 @@ class LongTermMemory:
         
         self._initialized = True
         logger.info("Long Term Memory initialized")
+    
+    # === QUERY CACHE METHODS ===
+    def _cache_get(self, key: str) -> Optional[Any]:
+        """Get value from query cache if not expired."""
+        if key in self._query_cache:
+            if time.time() - self._cache_timestamps.get(key, 0) < self._cache_ttl:
+                return self._query_cache[key]
+            else:
+                # Expired, remove
+                del self._query_cache[key]
+                self._cache_timestamps.pop(key, None)
+        return None
+    
+    def _cache_set(self, key: str, value: Any) -> None:
+        """Set value in query cache with LRU eviction."""
+        # LRU eviction if cache is full
+        if len(self._query_cache) >= self._cache_max_size:
+            # Remove oldest entry
+            oldest_key = min(self._cache_timestamps, key=self._cache_timestamps.get)
+            del self._query_cache[oldest_key]
+            del self._cache_timestamps[oldest_key]
+        
+        self._query_cache[key] = value
+        self._cache_timestamps[key] = time.time()
+    
+    def _cache_invalidate(self, pattern: Optional[str] = None) -> None:
+        """Invalidate cache entries matching pattern or all."""
+        if pattern:
+            keys_to_remove = [k for k in self._query_cache if pattern in k]
+            for key in keys_to_remove:
+                del self._query_cache[key]
+                self._cache_timestamps.pop(key, None)
+        else:
+            self._query_cache.clear()
+            self._cache_timestamps.clear()
     
     async def _create_tables(self) -> None:
         """Create database tables with migration support"""
@@ -682,6 +742,10 @@ class LongTermMemory:
                 DO UPDATE SET preference_value = ?, updated_at = CURRENT_TIMESTAMP
             """, (user_id, key, value_str, value_str))
             await self.db.commit()
+            
+            # Invalidate personalization cache for this user
+            self._cache_invalidate(f"personalization:{user_id}")
+            
             logger.info(f"Saved user preference: {key}={value_str[:50]}...")
         except Exception as e:
             logger.error(f"Failed to save user preference: {e}")
@@ -741,9 +805,18 @@ class LongTermMemory:
         """
         Генерирует персонализированные инструкции для промпта
         на основе сохраненных предпочтений пользователя.
+        
+        Results are cached for 5 minutes.
         """
+        # Check cache first
+        cache_key = f"personalization:{user_id}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+        
         prefs = await self.get_all_user_preferences(user_id)
         if not prefs:
+            self._cache_set(cache_key, "")
             return ""
         
         instructions = []
@@ -784,9 +857,12 @@ class LongTermMemory:
                 instructions.append("Используй простой текст без форматирования.")
         
         if not instructions:
+            self._cache_set(cache_key, "")
             return ""
         
-        return "\n### ПЕРСОНАЛИЗАЦИЯ (предпочтения пользователя):\n" + "\n".join(f"- {i}" for i in instructions) + "\n"
+        result = "\n### ПЕРСОНАЛИЗАЦИЯ (предпочтения пользователя):\n" + "\n".join(f"- {i}" for i in instructions) + "\n"
+        self._cache_set(cache_key, result)
+        return result
     
     # ==================== FAILED TASKS ====================
     
@@ -1055,6 +1131,10 @@ class LongTermMemory:
                 """, (model_name, task_type, 1 if success else 0, 0 if success else 1, quality, duration))
             
             await self.db.commit()
+            
+            # Invalidate best_model cache for this task_type
+            self._cache_invalidate(f"best_model:{task_type}")
+            
         except Exception as e:
             logger.error(f"Failed to record model task performance: {e}")
     
@@ -1066,9 +1146,17 @@ class LongTermMemory:
         """
         Получить лучшую модель для типа задачи на основе истории.
         
+        Results are cached for 5 minutes.
+        
         Returns:
             Информация о лучшей модели или None
         """
+        # Check cache first
+        cache_key = f"best_model:{task_type}:{min_samples}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached if cached != "__NONE__" else None
+        
         if not self._initialized:
             await self.initialize()
         
@@ -1085,13 +1173,17 @@ class LongTermMemory:
             
             if row:
                 total = row[1] + row[2]
-                return {
+                result = {
                     "model_name": row[0],
                     "success_rate": row[1] / total if total > 0 else 0,
                     "avg_quality": row[3],
                     "avg_duration": row[4],
                     "total_samples": total
                 }
+                self._cache_set(cache_key, result)
+                return result
+            
+            self._cache_set(cache_key, "__NONE__")  # Cache negative result
             return None
         except Exception as e:
             logger.error(f"Failed to get best model for task type: {e}")

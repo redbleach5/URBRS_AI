@@ -1,6 +1,6 @@
 """
 Smart Project Analyzer - комплексный анализ проектов с использованием
-всех инструментов системы: агентов, RAG, git, shell.
+всех инструментов системы: агентов, RAG, git, shell, SemanticCodeSearch.
 """
 
 import asyncio
@@ -11,6 +11,7 @@ from enum import Enum
 import time
 
 from ...core.logger import get_logger
+from ...rag.semantic_code_search import SemanticCodeSearch, get_semantic_code_search
 
 logger = get_logger(__name__)
 
@@ -76,6 +77,12 @@ class SmartProjectAnalyzer:
         self.engine = engine
         self.vector_store = getattr(engine, 'vector_store', None)
         self.tools = getattr(engine, 'tools', {})
+        
+        # Semantic Code Search для глубокого анализа кода
+        self.semantic_search: Optional[SemanticCodeSearch] = None
+        if self.vector_store:
+            llm_manager = getattr(engine, 'llm_manager', None)
+            self.semantic_search = get_semantic_code_search(self.vector_store, llm_manager)
     
     async def analyze(
         self,
@@ -330,6 +337,7 @@ class SmartProjectAnalyzer:
             "files_content": {},
             "git_info": None,
             "rag_context": None,
+            "semantic_entities": [],  # Сущности из SemanticCodeSearch
             "structure": []
         }
         
@@ -390,6 +398,10 @@ class SmartProjectAnalyzer:
         # 5. RAG контекст
         if use_rag and self.vector_store and strategy["rag_queries"] > 0:
             context["rag_context"] = await self._get_rag_context(path, profile, strategy)
+        
+        # 6. Semantic Code Search - глубокий анализ структуры кода
+        if use_rag and self.semantic_search:
+            context["semantic_entities"] = await self._get_semantic_entities(path, profile, strategy)
         
         return context
     
@@ -475,12 +487,107 @@ class SmartProjectAnalyzer:
                     pass
             
             if results:
-                return "\n---\n".join([r.get("content", "")[:500] for r in results[:5]])
+                return "\n---\n".join([r.get("content", r.get("text", ""))[:500] for r in results[:5]])
             
             return None
         except Exception as e:
             logger.debug(f"RAG context error: {e}")
             return None
+    
+    async def _get_semantic_entities(
+        self,
+        path: Path,
+        profile: ProjectProfile,
+        strategy: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """
+        Получает семантические сущности кода через SemanticCodeSearch.
+        
+        Индексирует проект если нужно и выполняет семантический поиск
+        по ключевым компонентам.
+        """
+        try:
+            if not self.semantic_search:
+                return []
+            
+            # Проверяем, проиндексирован ли проект
+            stats = self.semantic_search.get_stats()
+            if stats.get("project_path") != str(path) or stats.get("total_entities", 0) == 0:
+                # Индексируем проект для семантического поиска
+                logger.info(f"[SmartAnalyzer] Indexing project for semantic search: {path}")
+                max_files = min(strategy.get("max_files", 50), 100)
+                
+                await self.semantic_search.index_project(
+                    project_path=str(path),
+                    max_files=max_files,
+                    force_reindex=False
+                )
+            
+            entities = []
+            
+            # Поиск основных компонентов проекта
+            search_queries = [
+                "main entry point and initialization",
+                "core business logic and handlers",
+                "API routes and endpoints"
+            ]
+            
+            # Добавляем специфичные запросы для фреймворков
+            if "FastAPI" in profile.frameworks:
+                search_queries.append("FastAPI app and routers")
+            if "React" in profile.frameworks:
+                search_queries.append("React components and hooks")
+            if "Django" in profile.frameworks:
+                search_queries.append("Django views and models")
+            
+            # Фокус на безопасность или производительность
+            if strategy.get("focus") == "security":
+                search_queries.extend([
+                    "authentication and authorization",
+                    "input validation and sanitization"
+                ])
+            elif strategy.get("focus") == "performance":
+                search_queries.extend([
+                    "caching and optimization",
+                    "database queries and connections"
+                ])
+            
+            # Выполняем семантический поиск
+            for query in search_queries[:5]:  # Ограничиваем количество запросов
+                try:
+                    results = await self.semantic_search.search(
+                        query=query,
+                        top_k=3,
+                        min_score=0.4,
+                        use_reranking=False,  # Для скорости
+                        include_context=True
+                    )
+                    
+                    for result in results:
+                        entity_info = {
+                            "name": result.entity.name,
+                            "type": result.entity.type.value,
+                            "file": result.entity.file_path,
+                            "line": result.entity.start_line,
+                            "score": result.score,
+                            "docstring": result.entity.docstring[:200] if result.entity.docstring else None,
+                            "signature": result.entity.signature,
+                            "complexity": result.entity.complexity
+                        }
+                        
+                        # Избегаем дубликатов
+                        if not any(e["name"] == entity_info["name"] and e["file"] == entity_info["file"] for e in entities):
+                            entities.append(entity_info)
+                            
+                except Exception as e:
+                    logger.debug(f"Semantic search query failed: {query}: {e}")
+            
+            logger.info(f"[SmartAnalyzer] Found {len(entities)} semantic entities")
+            return entities[:20]  # Ограничиваем количество
+            
+        except Exception as e:
+            logger.debug(f"Semantic entities error: {e}")
+            return []
     
     async def _run_analysis(
         self,
@@ -700,6 +807,21 @@ class SmartProjectAnalyzer:
         if context.get("rag_context"):
             parts.append("\n=== Релевантный контекст из базы знаний ===")
             parts.append(context["rag_context"][:2000])
+        
+        # Semantic Entities (ключевые компоненты кода)
+        if context.get("semantic_entities"):
+            parts.append("\n=== Ключевые компоненты кода (Semantic Analysis) ===")
+            for entity in context["semantic_entities"][:15]:
+                entity_info = f"• {entity['type'].upper()}: {entity['name']}"
+                if entity.get('file'):
+                    entity_info += f" ({entity['file']}:{entity.get('line', '?')})"
+                if entity.get('signature'):
+                    entity_info += f"\n  Сигнатура: {entity['signature'][:100]}"
+                if entity.get('docstring'):
+                    entity_info += f"\n  Описание: {entity['docstring'][:150]}"
+                if entity.get('complexity', 0) > 10:
+                    entity_info += f"\n  ⚠️ Высокая сложность: {entity['complexity']}"
+                parts.append(entity_info)
         
         return '\n'.join(parts)
 

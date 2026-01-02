@@ -5,13 +5,15 @@ Chat router - Простой универсальный чат без агент
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime
 
 from backend.core.logger import get_logger
 from backend.llm.base import LLMMessage
 from backend.core.easter_eggs import check_easter_egg_trigger, get_birthday_greeting
 from backend.core.constants import Timeouts
+from backend.core.chat_summarizer import ChatSummarizer, ChatMessage as SummarizerMessage, get_chat_summarizer
+from backend.core.adaptive_temperature import get_optimal_temperature, get_temperature_info
 
 logger = get_logger(__name__)
 
@@ -150,51 +152,86 @@ async def summarize_old_messages(
 
 async def prepare_chat_history(
     history: List[ChatMessage],
-    llm_manager
-) -> List[LLMMessage]:
+    llm_manager,
+    conversation_id: Optional[str] = None
+) -> Tuple[List[LLMMessage], Optional[str]]:
     """
     Подготавливает историю чата для отправки в LLM.
-    Если история длинная, суммирует старые сообщения.
+    Использует ChatSummarizer для умного суммирования длинных диалогов.
     
     Args:
         history: Полная история чата
         llm_manager: LLM менеджер
+        conversation_id: ID разговора для кэширования summary
     
     Returns:
-        Список LLMMessage для отправки модели
+        Tuple[List[LLMMessage], summary_text] - сообщения и текст summary
     """
     if not history:
-        return []
+        return [], None
     
     messages = []
+    summary_text = None
     
     # Если история небольшая, отправляем всё
     if len(history) <= SUMMARIZE_THRESHOLD:
         for msg in history[-MAX_RECENT_MESSAGES:]:
             messages.append(LLMMessage(role=msg.role, content=msg.content))
-        return messages
+        return messages, None
     
-    # История большая - суммируем старые сообщения
-    old_messages = history[:-MAX_RECENT_MESSAGES]
-    recent_messages = history[-MAX_RECENT_MESSAGES:]
-    
-    # Суммируем старую часть
-    summary = await summarize_old_messages(old_messages, llm_manager)
-    
-    if summary:
-        # Добавляем суммирование как системное сообщение
-        messages.append(LLMMessage(
-            role="system",
-            content=f"Контекст предыдущего разговора:\n{summary}"
-        ))
-    
-    # Добавляем недавние сообщения
-    for msg in recent_messages:
-        messages.append(LLMMessage(role=msg.role, content=msg.content))
-    
-    logger.info(f"Prepared history: {len(old_messages)} summarized + {len(recent_messages)} recent messages")
-    
-    return messages
+    # Используем ChatSummarizer для умного суммирования
+    try:
+        summarizer = get_chat_summarizer(llm_manager)
+        
+        # Конвертируем сообщения
+        summarizer_messages = [
+            SummarizerMessage(role=msg.role, content=msg.content)
+            for msg in history
+        ]
+        
+        # Суммируем если нужно
+        recent_msgs, summary = await summarizer.summarize_if_needed(
+            messages=summarizer_messages,
+            conversation_id=conversation_id
+        )
+        
+        if summary:
+            summary_text = summary.to_system_prompt()
+            # Добавляем summary как системное сообщение
+            messages.append(LLMMessage(
+                role="system",
+                content=summary_text
+            ))
+            logger.info(
+                f"ChatSummarizer: {summary.messages_summarized} messages summarized, "
+                f"reliability: {len(summary.key_topics)} topics"
+            )
+        
+        # Добавляем недавние сообщения
+        for msg in recent_msgs:
+            messages.append(LLMMessage(role=msg.role, content=msg.content))
+        
+        return messages, summary_text
+        
+    except Exception as e:
+        logger.warning(f"ChatSummarizer failed, using fallback: {e}")
+        
+        # Fallback к старому методу
+        old_messages = history[:-MAX_RECENT_MESSAGES]
+        recent_messages = history[-MAX_RECENT_MESSAGES:]
+        
+        summary = await summarize_old_messages(old_messages, llm_manager)
+        
+        if summary:
+            summary_text = f"Контекст предыдущего разговора:\n{summary}"
+            messages.append(LLMMessage(role="system", content=summary_text))
+        
+        for msg in recent_messages:
+            messages.append(LLMMessage(role=msg.role, content=msg.content))
+        
+        logger.info(f"Prepared history (fallback): {len(old_messages)} summarized + {len(recent_messages)} recent")
+        
+        return messages, summary_text
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -242,17 +279,58 @@ async def chat(request: Request, chat_request: ChatRequest):
         # Используем короткий промпт для простых запросов
         use_fast_prompt = complexity_info and complexity_info.level.value in ["trivial", "simple"]
         
+        # ======= LONG TERM MEMORY INTEGRATION =======
+        # Получаем персонализацию и предупреждения из памяти
+        personalization_prompt = ""
+        error_avoidance_prompt = ""
+        memory_used = False
+        
+        if engine.memory:
+            try:
+                # Персонализация на основе предпочтений пользователя
+                personalization_prompt = await engine.memory.get_personalization_prompt()
+                
+                # Предупреждения о похожих ошибках в прошлом
+                error_avoidance_prompt = await engine.memory.get_error_avoidance_prompt(
+                    task=chat_request.message
+                )
+                
+                memory_used = bool(personalization_prompt or error_avoidance_prompt)
+                
+                if memory_used:
+                    logger.debug(f"Memory context applied: personalization={bool(personalization_prompt)}, errors={bool(error_avoidance_prompt)}")
+            except Exception as e:
+                logger.debug(f"Memory integration failed (non-critical): {e}")
+        
         # Формируем сообщения
+        base_system_prompt = get_system_prompt(chat_request.mode or "general", use_fast=use_fast_prompt)
+        
+        # Добавляем память в system prompt
+        if personalization_prompt:
+            base_system_prompt += f"\n\n### ПЕРСОНАЛИЗАЦИЯ:\n{personalization_prompt}"
+        if error_avoidance_prompt:
+            base_system_prompt += f"\n\n### ПРЕДУПРЕЖДЕНИЯ (избегай прошлых ошибок):\n{error_avoidance_prompt}"
+        
         messages = [
             LLMMessage(
                 role="system",
-                content=get_system_prompt(chat_request.mode or "general", use_fast=use_fast_prompt)
+                content=base_system_prompt
             )
         ]
         
         # Добавляем историю если есть (с умной суммаризацией для длинных диалогов)
+        summary_used = None
         if chat_request.history:
-            history_messages = await prepare_chat_history(chat_request.history, llm_manager)
+            # Генерируем ID разговора для кэширования summary
+            import hashlib
+            first_msg = chat_request.history[0].content[:50] if chat_request.history else ""
+            conv_id = hashlib.md5(first_msg.encode()).hexdigest()[:8]
+            
+            history_messages, summary_used = await prepare_chat_history(
+                chat_request.history, 
+                llm_manager,
+                conversation_id=conv_id
+            )
             messages.extend(history_messages)
         
         # Добавляем текущее сообщение
@@ -260,6 +338,24 @@ async def chat(request: Request, chat_request: ChatRequest):
             role="user",
             content=chat_request.message
         ))
+        
+        # ======= RAG CONTEXT ENRICHMENT =======
+        # Добавляем релевантный контекст из базы знаний (RAG)
+        rag_context = ""
+        if engine.context_manager:
+            try:
+                # Получаем контекст из RAG для обогащения ответа
+                relevant_context = await engine.context_manager.get_context(
+                    query=chat_request.message,
+                    max_tokens=1500,  # Ограничиваем размер контекста
+                    use_expansion=True,
+                    use_multi_query=False  # Для скорости в чате
+                )
+                if relevant_context and len(relevant_context.strip()) > 50:
+                    rag_context = f"\n\n📚 **Релевантная информация из базы знаний:**\n{relevant_context[:2000]}"
+                    logger.debug(f"RAG context added: {len(relevant_context)} chars")
+            except Exception as e:
+                logger.warning(f"Chat RAG context failed: {e}")
         
         # Определяем нужен ли поиск в интернете
         message_lower = chat_request.message.lower()
@@ -305,12 +401,23 @@ async def chat(request: Request, chat_request: ChatRequest):
                         logger.debug(f"Web context for LLM:\n{web_context[:500]}...")
                         
                         # Добавляем контекст к сообщению с чётким инструкциями
+                        combined_context = web_context
+                        if rag_context:
+                            combined_context += rag_context
+                        
                         messages[-1] = LLMMessage(
                             role="user",
-                            content=f"{chat_request.message}\n\n{web_context}\n\n**ВАЖНО:** Используй найденную информацию из интернета для ответа. Если есть конкретные цены, товары или факты - включи их в ответ. Укажи источники."
+                            content=f"{chat_request.message}\n\n{combined_context}\n\n**ВАЖНО:** Используй найденную информацию для ответа. Если есть конкретные цены, товары или факты - включи их в ответ. Укажи источники."
                         )
             except Exception as e:
                 logger.warning(f"Chat web search failed: {e}")
+        
+        # Если web search не нужен, но есть RAG контекст - добавляем его
+        elif rag_context:
+            messages[-1] = LLMMessage(
+                role="user",
+                content=f"{chat_request.message}{rag_context}\n\n**Используй релевантную информацию из базы знаний если она помогает ответить на вопрос.**"
+            )
         
         # ======= РАСПРЕДЕЛЁННЫЙ УМНЫЙ ВЫБОР МОДЕЛИ =======
         # Учитывает все сервера (localhost + remote) и выбирает лучший
@@ -405,14 +512,31 @@ async def chat(request: Request, chat_request: ChatRequest):
         if server_url_to_use:
             generate_kwargs["server_url"] = server_url_to_use
         
+        # Автоматически включаем thinking mode для моделей с поддержкой
+        thinking_models = ["deepseek-r1", "deepseek-r2", "qwen3", "llama3.3"]
+        use_thinking = model_to_use and any(tm in model_to_use.lower() for tm in thinking_models)
+        if use_thinking:
+            logger.info(f"Enabling thinking mode for model: {model_to_use}")
+        
+        # ======= ADAPTIVE TEMPERATURE =======
+        # Выбираем температуру в зависимости от типа задачи
+        complexity_level = complexity_info.level.value if complexity_info else None
+        adaptive_temp = get_optimal_temperature(
+            task=chat_request.message,
+            mode=chat_request.mode,
+            complexity=complexity_level
+        )
+        logger.debug(f"Adaptive temperature: {adaptive_temp:.2f} for mode={chat_request.mode}")
+        
         try:
             response = await asyncio.wait_for(
                 llm_manager.generate(
                     messages=messages,
                     provider_name=provider_to_use,
                     model=model_to_use,
-                    temperature=0.7,
+                    temperature=adaptive_temp,  # Адаптивная температура
                     max_tokens=max_tokens,
+                    thinking_mode=use_thinking,
                     **generate_kwargs
                 ),
                 timeout=float(Timeouts.CHAT_TIMEOUT)
@@ -461,6 +585,11 @@ async def chat(request: Request, chat_request: ChatRequest):
                 "has_thinking": getattr(response, 'thinking', None) is not None,
                 "thinking": getattr(response, 'thinking', None),
                 "web_search_used": bool(web_context),
+                "rag_context_used": bool(rag_context),
+                "chat_summarized": bool(summary_used),  # Было ли суммирование истории
+                "memory_personalization": bool(personalization_prompt),  # Персонализация из памяти
+                "memory_error_avoidance": bool(error_avoidance_prompt),  # Предупреждения об ошибках
+                "adaptive_temperature": adaptive_temp,  # Адаптивная температура
                 "complexity_level": complexity_info.level.value if complexity_info else None,
                 "estimated_minutes": complexity_info.estimated_minutes if complexity_info else None,
                 "smart_model_selection": True,  # Показываем что использовался умный выбор

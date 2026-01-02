@@ -1,19 +1,35 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, lazy, Suspense } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { UnifiedChat } from './UnifiedChat';
-import { IDE } from './IDE';
-import { ToolsPanel } from './ToolsPanel';
-import { MonitoringPanel } from './MonitoringPanel';
-import { MetricsPanel } from './MetricsPanel';
-import { LearningDashboard } from './LearningDashboard';
-import SettingsPanel from './SettingsPanel';
 import { getStatus } from '../api/client';
 import { useExecutionInfo } from '../state/executionContext';
 import {
   MessageSquare, Code2, Activity, BarChart3, 
-  GraduationCap, Settings, Bot, Brain, Wrench, AlertCircle, X, RefreshCw
+  GraduationCap, Settings, Bot, Brain, Wrench, AlertCircle, X, RefreshCw, Loader2
 } from 'lucide-react';
 import { UroborosLogo } from './icons/UroborosLogo';
+
+// === CODE SPLITTING ===
+// Lazy load heavy components to reduce initial bundle size
+// Chat is not lazy because it's the default tab
+import { UnifiedChat } from './UnifiedChat';
+
+// Lazy load less frequently used tabs
+const IDE = lazy(() => import('./IDE').then(m => ({ default: m.IDE })));
+const ToolsPanel = lazy(() => import('./ToolsPanel').then(m => ({ default: m.ToolsPanel })));
+const MonitoringPanel = lazy(() => import('./MonitoringPanel').then(m => ({ default: m.MonitoringPanel })));
+const MetricsPanel = lazy(() => import('./MetricsPanel').then(m => ({ default: m.MetricsPanel })));
+const LearningDashboard = lazy(() => import('./LearningDashboard').then(m => ({ default: m.LearningDashboard })));
+const SettingsPanel = lazy(() => import('./SettingsPanel'));
+
+// Loading fallback component
+const TabLoadingFallback = () => (
+  <div className="flex-1 flex items-center justify-center bg-[#0f111b]">
+    <div className="flex flex-col items-center gap-3 text-gray-400">
+      <Loader2 size={32} className="animate-spin text-blue-500" />
+      <span className="text-sm">Загрузка...</span>
+    </div>
+  </div>
+);
 
 export function MainLayout() {
   const [activeTab, setActiveTab] = useState<
@@ -254,12 +270,14 @@ export function MainLayout() {
       {/* Content */}
       <div className="flex-1 overflow-auto">
         {activeTab === 'chat' && <UnifiedChat />}
-        {activeTab === 'ide' && <IDE />}
-        {activeTab === 'tools' && <ToolsPanel />}
-        {activeTab === 'monitoring' && <MonitoringPanel />}
-        {activeTab === 'metrics' && <MetricsPanel />}
-        {activeTab === 'learning' && <LearningDashboard />}
-        {activeTab === 'settings' && <SettingsPanel />}
+        <Suspense fallback={<TabLoadingFallback />}>
+          {activeTab === 'ide' && <IDE />}
+          {activeTab === 'tools' && <ToolsPanel />}
+          {activeTab === 'monitoring' && <MonitoringPanel />}
+          {activeTab === 'metrics' && <MetricsPanel />}
+          {activeTab === 'learning' && <LearningDashboard />}
+          {activeTab === 'settings' && <SettingsPanel />}
+        </Suspense>
       </div>
       
       {/* Error Modal */}

@@ -1,17 +1,57 @@
 """
 Models router - API для управления моделями LLM
-Выбор, автоопределение, рейтинг моделей
+Выбор, автоопределение, рейтинг моделей, политика маршрутизации
 """
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 
 from backend.core.logger import get_logger
+from backend.core.types import CostTier, RoutingPolicy, ProviderInfo
 
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+
+# ============ Routing Policy Models ============
+
+class RoutingPolicyRequest(BaseModel):
+    """Запрос на обновление политики маршрутизации"""
+    prefer_local: bool = Field(True, description="Предпочитать локальные модели (Ollama)")
+    require_private: bool = Field(False, description="Строго требовать приватность")
+    max_cost_tier: int = Field(4, ge=1, le=4, description="Макс. стоимость: 1=FREE, 2=CHEAP, 3=STANDARD, 4=PREMIUM")
+    prefer_cheap: bool = Field(False, description="Предпочитать дешёвые модели")
+    prefer_quality: bool = Field(True, description="Предпочитать качество скорости")
+    min_quality: float = Field(0.5, ge=0, le=1, description="Минимальный порог качества")
+    allowed_providers: Optional[List[str]] = Field(None, description="Разрешённые провайдеры")
+    blocked_providers: Optional[List[str]] = Field(None, description="Заблокированные провайдеры")
+
+
+class RoutingPolicyResponse(BaseModel):
+    """Ответ с политикой маршрутизации"""
+    success: bool
+    policy: Dict[str, Any]
+    presets: Dict[str, Dict[str, Any]]
+
+
+class ProviderInfoResponse(BaseModel):
+    """Информация о провайдере"""
+    name: str
+    is_local: bool
+    is_private: bool
+    cost_tier: int
+    cost_tier_name: str
+    enabled: bool
+    description: str
+
+
+class ProvidersInfoResponse(BaseModel):
+    """Ответ со списком провайдеров"""
+    success: bool
+    providers: List[ProviderInfoResponse]
+    default_provider: str
 
 
 class ModelInfo(BaseModel):
@@ -504,5 +544,157 @@ async def recommend_model(
         raise
     except Exception as e:
         logger.error(f"Error recommending model: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============ Routing Policy Endpoints ============
+
+@router.get("/models/routing-policy", response_model=RoutingPolicyResponse)
+async def get_routing_policy(request: Request):
+    """Получить текущую политику маршрутизации"""
+    try:
+        engine = request.app.state.engine
+        if not engine:
+            raise HTTPException(status_code=503, detail="Engine не инициализирован")
+        
+        # Получаем политику из UnifiedModelRouter
+        from backend.core.unified_model_router import get_unified_router
+        
+        try:
+            router_instance = get_unified_router()
+            policy = router_instance.DEFAULT_POLICY
+        except ValueError:
+            # Router ещё не инициализирован, возвращаем дефолтную политику
+            policy = RoutingPolicy()
+        
+        # Готовим preset политики
+        presets = {
+            "privacy_first": RoutingPolicy.privacy_first().to_dict(),
+            "cost_first": RoutingPolicy.cost_first().to_dict(),
+            "quality_first": RoutingPolicy.quality_first().to_dict(),
+            "balanced": RoutingPolicy.balanced().to_dict(),
+        }
+        
+        return RoutingPolicyResponse(
+            success=True,
+            policy=policy.to_dict(),
+            presets=presets
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting routing policy: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/models/routing-policy", response_model=RoutingPolicyResponse)
+async def update_routing_policy(policy_req: RoutingPolicyRequest, request: Request):
+    """Обновить политику маршрутизации"""
+    try:
+        engine = request.app.state.engine
+        if not engine:
+            raise HTTPException(status_code=503, detail="Engine не инициализирован")
+        
+        # Создаём новую политику
+        new_policy = RoutingPolicy(
+            prefer_local=policy_req.prefer_local,
+            require_private=policy_req.require_private,
+            max_cost_tier=CostTier(policy_req.max_cost_tier),
+            prefer_cheap=policy_req.prefer_cheap,
+            prefer_quality=policy_req.prefer_quality,
+            min_quality=policy_req.min_quality,
+            allowed_providers=policy_req.allowed_providers,
+            blocked_providers=policy_req.blocked_providers,
+        )
+        
+        # Обновляем политику в UnifiedModelRouter
+        from backend.core.unified_model_router import get_unified_router
+        
+        try:
+            router_instance = get_unified_router()
+            router_instance.DEFAULT_POLICY = new_policy
+            logger.info(f"Routing policy updated: prefer_local={new_policy.prefer_local}, "
+                       f"require_private={new_policy.require_private}, "
+                       f"max_cost={new_policy.max_cost_tier.name}")
+        except ValueError:
+            # Router ещё не инициализирован
+            logger.warning("Router not initialized, policy will be applied on next init")
+        
+        # Также сохраняем в config.yaml для персистентности
+        # Это будет сделано через update_config endpoint
+        
+        presets = {
+            "privacy_first": RoutingPolicy.privacy_first().to_dict(),
+            "cost_first": RoutingPolicy.cost_first().to_dict(),
+            "quality_first": RoutingPolicy.quality_first().to_dict(),
+            "balanced": RoutingPolicy.balanced().to_dict(),
+        }
+        
+        return RoutingPolicyResponse(
+            success=True,
+            policy=new_policy.to_dict(),
+            presets=presets
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating routing policy: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/models/providers-info", response_model=ProvidersInfoResponse)
+async def get_providers_info(request: Request):
+    """Получить информацию о всех провайдерах (local, private, cost)"""
+    try:
+        engine = request.app.state.engine
+        if not engine:
+            raise HTTPException(status_code=503, detail="Engine не инициализирован")
+        
+        from backend.core.unified_model_router import PROVIDER_INFO
+        from backend.config import get_config
+        
+        config = get_config()
+        providers_config = config.llm.providers
+        default_provider = config.llm.default_provider
+        
+        providers_list = []
+        
+        # Описания провайдеров
+        descriptions = {
+            "ollama": "🦙 Локальные модели — бесплатно, приватно, без интернета",
+            "openai": "🤖 OpenAI GPT — облачные модели, требуется API ключ",
+            "anthropic": "🧠 Anthropic Claude — облачные модели, требуется API ключ",
+        }
+        
+        for provider_name, provider_info in PROVIDER_INFO.items():
+            # Проверяем включён ли провайдер
+            provider_cfg = getattr(providers_config, provider_name, None)
+            enabled = provider_cfg.enabled if provider_cfg else False
+            
+            providers_list.append(ProviderInfoResponse(
+                name=provider_name,
+                is_local=provider_info.is_local,
+                is_private=provider_info.is_private,
+                cost_tier=provider_info.cost_tier.value,
+                cost_tier_name=provider_info.cost_tier.name,
+                enabled=enabled,
+                description=descriptions.get(provider_name, f"Провайдер {provider_name}")
+            ))
+        
+        # Сортируем: сначала локальные, потом по стоимости
+        providers_list.sort(key=lambda p: (not p.is_local, p.cost_tier))
+        
+        return ProvidersInfoResponse(
+            success=True,
+            providers=providers_list,
+            default_provider=default_provider
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting providers info: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
